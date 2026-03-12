@@ -1,0 +1,20 @@
+{
+  "name": "Nerodolla",
+  "short_name": "Nerodolla",
+  "description": "Self-custody XMR wallet with USD lock via Lighter.xyz",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#161616",
+  "theme_color": "#ff6600",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "prefer_related_applications": false
+}

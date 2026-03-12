@@ -1,0 +1,45 @@
+node_modules/
+dist/
+dist_backup_*/
+.env
+*.local
+
+# Capacitor
+android/
+ios/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Server data (contains private keys / user accounts)
+wallets/
+*.db
+*.sqlite
+*.mdb
+.lighter_setup.json
+lws-data/
+
+# TLS certs
+.cert/
+
+# APK binaries
+*.apk
+website/*.apk
+
+# Server-specific
+nerodolla-proxy.service
+
+# Internal / not for publication
+AUDIT_REPORT.txt
+TODO.md
+setup_lighter_key.py
+website/
+
+# Editor
+.DS_Store
+.vscode/
+*.swp
