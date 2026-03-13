@@ -2,7 +2,7 @@
 
 Self-custody Monero wallet with delta-neutral USD hedge via [Lighter.xyz](https://lighter.xyz).
 
-Lock in the USD value of your XMR and earn funding yield (~19% APY historically) — no token, no KYC, no custodian.
+Lock in the USD value of your XMR and earn funding yield — no token, no KYC, no custodian.
 
 ## How It Works
 
