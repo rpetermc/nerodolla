@@ -33,11 +33,18 @@ website/*.apk
 # Server-specific
 nerodolla-proxy.service
 
+# Logs
+*.log
+
 # Internal / not for publication
 AUDIT_REPORT.txt
+PRIVACY_CRITIQUE.txt
 TODO.md
 setup_lighter_key.py
 website/
+
+# External VPS services (not part of nerodolla)
+basicswap.service
 
 # Editor
 .DS_Store

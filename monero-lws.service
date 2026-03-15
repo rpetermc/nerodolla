@@ -1,0 +1,32 @@
+[Unit]
+Description=monero-lws (Monero light wallet server)
+After=docker.service network-online.target monerod-pruned.service
+Requires=docker.service
+Wants=monerod-pruned.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker stop monero-lws
+ExecStartPre=-/usr/bin/docker rm monero-lws
+ExecStart=/usr/bin/docker run \
+    --name monero-lws \
+    --rm \
+    --network host \
+    --user root \
+    -v /root/nerodolla/lws-data:/data \
+    ghcr.io/vtnerd/monero-lws:master \
+    monero-lws-daemon \
+    --daemon tcp://127.0.0.1:18091 \
+    --rest-server http://0.0.0.0:8444 \
+    --db-path /data \
+    --network main \
+    --auto-accept-creation \
+    --confirm-external-bind \
+    --disable-admin-auth \
+    --log-level 1
+ExecStop=/usr/bin/docker stop monero-lws
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically check if monero-wallet-rpc should switch to local node
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+Unit=monero-wallet-rpc-recheck.service
+
+[Install]
+WantedBy=timers.target

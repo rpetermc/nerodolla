@@ -1,0 +1,6 @@
+[Unit]
+Description=Check if monero-wallet-rpc should switch to local node
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/monero-wallet-rpc-recheck.sh
