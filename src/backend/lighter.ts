@@ -58,6 +58,20 @@ export function setSessionRenewer(fn: (() => Promise<void>) | null): void {
   _sessionRenewer = fn;
 }
 
+/**
+ * Attempt to renew the current session using the registered renewer.
+ * Returns true if renewal succeeded, false if there is no renewer or it failed.
+ */
+export async function renewSession(): Promise<boolean> {
+  if (!_sessionRenewer) return false;
+  try {
+    await _sessionRenewer();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface LighterPosition {
   symbol: string;          // e.g. 'XMR-USD'
   side: 'LONG' | 'SHORT';

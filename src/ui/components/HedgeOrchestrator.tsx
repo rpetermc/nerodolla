@@ -31,7 +31,7 @@ import {
 import type { LighterSigningData } from '../../backend/lighter';
 import { signMessage } from '../../wallet/eth';
 import { saveZkKey } from '../../wallet/keystore';
-import { setProxySessionToken } from '../../backend/lighter';
+import { setProxySessionToken, renewSession } from '../../backend/lighter';
 
 // ── Persistence helpers (resume after PIN lock) ────────────────────────────
 
@@ -233,7 +233,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       // Fetch initial quote for the default 20% amount (uses maxXmr captured in closure)
       const defaultXmr = maxXmr > 0 ? Math.floor(maxXmr * 20 / 100 * 1e6) / 1e6 : 0;
       if (defaultXmr >= parseFloat(MIN_SWAP_XMR)) fetchQuote(defaultXmr.toFixed(6));
-      setStep('mode_select');
+      setStep('slider');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Setup check failed');
       setStep('error');
@@ -278,7 +278,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       setStep('live');
       onHedgeOpened();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to start bot');
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('401')) {
+        const renewed = await renewSession();
+        if (renewed) { setStep('usdc_ready'); return; }
+        setErrorMsg('Session expired — please lock the app and re-enter your PIN.');
+      } else {
+        setErrorMsg(msg || 'Failed to start bot');
+      }
       setStep('error');
     }
   }
@@ -330,7 +337,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       if (!result.success) throw new Error(result.error ?? 'Open hedge failed');
       await waitForPositionThenComplete();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Open hedge failed');
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('401')) {
+        const renewed = await renewSession();
+        if (renewed) { setStep('usdc_ready'); return; }
+        setErrorMsg('Session expired — please lock the app and re-enter your PIN.');
+      } else {
+        setErrorMsg(msg || 'Open hedge failed');
+      }
       setStep('error');
     }
   }
