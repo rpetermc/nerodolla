@@ -28,23 +28,51 @@ export function PinScreen() {
       const ethWallet = deriveEthWallet(ethSeedFromMaster(seed));
       setKeys(mnemonic, xmrKeys, ethWallet);
       // Fire-and-forget: initialise Lighter session if a ZK key is stored.
-      // If the server rejects the key (stale cached key on secondary device),
-      // clear it, re-migrate from the server, and retry once.
+      // Falls back to migrating the key from the proxy when none is found locally
+      // (covers browser users who first set up on Android, or cross-device access).
+      // The session renewer also handles stale keys so 401s auto-recover mid-session.
       loadZkKey(ethWallet.privateKey).then(async (zkPrivKey) => {
-        if (!zkPrivKey) return;
-        const applySession = (token: string, key: string) => {
+        let key = zkPrivKey;
+
+        // No key in localStorage — try pulling it from the proxy's legacy setup file.
+        // This is the normal path for browser users whose Lighter was set up on Android.
+        if (!key) {
+          try {
+            key = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
+            if (key) await saveZkKey(ethWallet.privateKey, key);
+          } catch { /* proxy may not have a key yet — will be set up on first hedge */ }
+        }
+
+        if (!key) return;
+
+        // applySession stores the token and registers an auto-renewer.
+        // The renewer handles zk_key_rejected by pulling the latest key from the proxy,
+        // so cross-device key rotation (e.g. Android re-registers the key) is transparent.
+        const applySession = (token: string, currentKey: string) => {
           setSessionToken(token);
           setProxySessionToken(token);
-          // Register auto-renewer so proxyFetch can silently recover from 401s.
           setSessionRenewer(async () => {
-            const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, key);
-            setSessionToken(newToken);
-            setProxySessionToken(newToken);
+            try {
+              const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, currentKey);
+              setSessionToken(newToken);
+              setProxySessionToken(newToken);
+            } catch (renewErr) {
+              if (renewErr instanceof Error && renewErr.message.includes('zk_key_rejected')) {
+                // Key was rotated on another device — migrate the current key from the proxy
+                const freshKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
+                await saveZkKey(ethWallet.privateKey, freshKey);
+                const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, freshKey);
+                applySession(newToken, freshKey); // updates token + re-registers renewer with fresh key
+              } else {
+                throw renewErr;
+              }
+            }
           });
         };
+
         try {
-          const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, zkPrivKey);
-          applySession(token, zkPrivKey);
+          const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, key);
+          applySession(token, key);
         } catch (err) {
           if (err instanceof Error && err.message.includes('zk_key_rejected')) {
             try {
