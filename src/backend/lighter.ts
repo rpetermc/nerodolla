@@ -22,7 +22,7 @@ export function getProxyBase(): string {
     const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
     if (!cap?.isNativePlatform?.()) return '';
     const raw = localStorage.getItem('nerodolla-settings');
-    const url: string = (JSON.parse(raw ?? '{}') as { state?: { lighterProxyUrl?: string } }).state?.lighterProxyUrl ?? 'https://proxy.example.com';
+    const url: string = (JSON.parse(raw ?? '{}') as { state?: { lighterProxyUrl?: string } }).state?.lighterProxyUrl ?? (import.meta.env.VITE_PROXY_URL || 'https://proxy.example.com');
     return url.replace(/\/$/, '');
   } catch {
     return '';

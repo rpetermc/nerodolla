@@ -34,7 +34,7 @@ function proxyBase(): string {
     const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
     if (!cap?.isNativePlatform?.()) return '';
     const raw = localStorage.getItem('nerodolla-settings');
-    const url: string = (JSON.parse(raw ?? '{}') as { state?: { lighterProxyUrl?: string } }).state?.lighterProxyUrl ?? 'http://localhost:8000';
+    const url: string = (JSON.parse(raw ?? '{}') as { state?: { lighterProxyUrl?: string } }).state?.lighterProxyUrl ?? (import.meta.env.VITE_PROXY_URL || 'http://localhost:8000');
     return url.replace(/\/$/, '');
   } catch {
     return '';
@@ -309,6 +309,31 @@ export function xmrToAtomic(xmrStr: string): string {
   const [whole, frac = ''] = xmrStr.split('.');
   const fracPadded = frac.padEnd(12, '0').slice(0, 12);
   return (BigInt(whole || '0') * 1_000_000_000_000n + BigInt(fracPadded || '0')).toString();
+}
+
+/**
+ * Trigger a background wallet sync so it's ready when the user confirms a transfer.
+ * Returns immediately — the sync runs asynchronously on the server.
+ * Safe to call multiple times; idempotent.
+ */
+export async function presyncWallet(
+  address: string,
+  viewKey: string,
+  restoreHeight?: number,
+): Promise<void> {
+  try {
+    await fetch(`${proxyBase()}/lws/presync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address,
+        view_key: viewKey,
+        ...(restoreHeight != null ? { restore_height: restoreHeight } : {}),
+      }),
+    });
+  } catch {
+    // Non-fatal — if this fails, the transfer will still trigger a sync
+  }
 }
 
 /** Estimate network fee for a standard XMR transfer (no spend key required). */

@@ -279,7 +279,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       lwsEndpoint: '/lws',
       network: 'mainnet',
       ethRpcUrl: 'https://rpc.ankr.com/eth',
-      lighterProxyUrl: 'https://proxy.example.com',
+      lighterProxyUrl: import.meta.env.VITE_PROXY_URL || 'https://proxy.example.com',
       currency: 'USD',
 
       updateSettings: (patch) => set((s) => ({ ...s, ...patch })),

@@ -99,7 +99,7 @@ export function SettingsScreen() {
             className="settings-input"
             value={proxyInput}
             onChange={(e) => setProxyInput(e.target.value)}
-            placeholder="https://proxy.example.com"
+            placeholder={import.meta.env.VITE_PROXY_URL || "https://proxy.example.com"}
             autoCapitalize="none"
             autoCorrect="off"
           />

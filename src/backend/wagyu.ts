@@ -313,12 +313,28 @@ export interface WagyuOrderDetail extends WagyuOrder {
 // ── Internal ───────────────────────────────────────────────────────────────────
 
 async function wagyuFetch<T>(path: string, options: RequestInit = {}, apiKey = WAGYU_API_KEY): Promise<T> {
-  const url = `${WAGYU_API_BASE}${path}`;
+  // On native (Android/iOS), route through proxy to avoid connectivity issues
+  // and keep API keys server-side. The proxy adds the correct X-API-KEY.
+  const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
+  const isNative = !!cap?.isNativePlatform?.();
+
+  let url: string;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
   };
-  if (apiKey) headers['X-API-KEY'] = apiKey;
+
+  if (isNative) {
+    // Route via proxy: /wagyu/v1/quote, /wagyu/v1/order, /wagyu/v1/order/:id
+    const { getProxyBase } = await import('./lighter');
+    const proxyBase = getProxyBase();
+    const isHedge = apiKey === WAGYU_HEDGE_API_KEY;
+    url = `${proxyBase}/wagyu${path}${path.includes('?') ? '&' : '?'}hedge=${isHedge ? '1' : '0'}`;
+  } else {
+    url = `${WAGYU_API_BASE}${path}`;
+    if (apiKey) headers['X-API-KEY'] = apiKey;
+  }
+
   const res = await fetch(url, { ...options, headers });
   if (!res.ok) {
     const body = await res.text();

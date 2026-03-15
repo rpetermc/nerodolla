@@ -16,7 +16,7 @@ import {
   MIN_SWAP_XMR,
 } from '../../backend/wagyu';
 import type { WagyuQuote, WagyuOrder, WagyuOrderDetail } from '../../backend/wagyu';
-import { transferXmr } from '../../backend/lws';
+import { transferXmr, presyncWallet } from '../../backend/lws';
 import {
   checkLighterSetup,
   generateLighterZkKey,
@@ -154,6 +154,11 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       // Check setup status first — generate a new ZK key only if one isn't registered yet.
       // Generating a key overwrites localStorage, so we must not do it for existing accounts
       // (the new unregistered key would break signing).
+      // Start wallet sync early so it's ready by the time user confirms
+      if (xmrKeys) {
+        presyncWallet(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, walletCreatedHeight ?? undefined);
+      }
+
       const status = await checkLighterSetup(ethWallet.address);
       const isNew = !status.accountExists || !status.hasApiKey;
       isNewAccountRef.current = isNew;
@@ -210,7 +215,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             setStep('mode_select');
             return;
           }
-          if (depStatus.status === 'pending') {
+          if (depStatus.status === 'pending' && depStatus.amountUsdc && depStatus.amountUsdc > 0) {
             setDepositPendingAmt(depStatus.amountUsdc);
             setPendingRecoveryStep('deposit_pending');
             setStep('mode_select');
@@ -343,14 +348,25 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       wagyuOrderRef.current = order;
 
       setStep('sending_xmr');
-      await transferXmr(
-        xmrKeys.primaryAddress,
-        xmrKeys.viewKeyPrivate,
-        xmrKeys.spendKeyPrivate,
-        order.depositAddress,
-        order.depositAmount,
-        walletCreatedHeight ?? undefined,
-      );
+      try {
+        await transferXmr(
+          xmrKeys.primaryAddress,
+          xmrKeys.viewKeyPrivate,
+          xmrKeys.spendKeyPrivate,
+          order.depositAddress,
+          order.depositAmount,
+          walletCreatedHeight ?? undefined,
+        );
+      } catch (txErr) {
+        const msg = txErr instanceof Error ? txErr.message : '';
+        if (msg.includes('syncing') || msg.includes('503')) {
+          setErrorMsg('Wallet is still syncing with the network. This is normal on first use — please wait a moment and try again.');
+        } else {
+          setErrorMsg(msg || 'XMR transfer failed');
+        }
+        setStep('error');
+        return;
+      }
 
       setStep('bridging');
       saveHedgeState({ wagyuOrder: order, isNewAccount: isNewAccountRef.current });
