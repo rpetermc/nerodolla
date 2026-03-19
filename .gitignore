@@ -25,10 +25,21 @@ lws-data/
 
 # TLS certs
 .cert/
+ssl/
 
 # APK binaries
 *.apk
 website/*.apk
+
+# Server-side — not for public repo
+lighter_proxy.py
+requirements-proxy.txt
+monero-wallet-rpc-wrapper.sh
+monero-wallet-rpc-recheck.sh
+monerod-pruned.service
+deploy.py
+Caddyfile
+rescan_wallets.py
 
 # Server-specific
 nerodolla-proxy.service
@@ -41,6 +52,10 @@ AUDIT_REPORT.txt
 PRIVACY_CRITIQUE.txt
 TODO.md
 setup_lighter_key.py
+setup_nginx.sh
+setup_nginx_ssl.sh
+setup_ipns.py
+lighter-perp-capacity-analysis.txt
 website/
 
 # External VPS services (not part of nerodolla)
