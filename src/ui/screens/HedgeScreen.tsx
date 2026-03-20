@@ -4,7 +4,8 @@ import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
 import { TopUpFlow } from '../components/TopUpFlow';
-import { getHedgeStatus, getXmrMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge } from '../../backend/lighter';
+import { getHedgeStatus, getXmrMarketInfo, getEurMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge } from '../../backend/lighter';
+import type { LighterMarketInfo, LighterPosition } from '../../backend/lighter';
 
 const WARN_MARGIN_PCT = 20;
 const CRIT_MARGIN_PCT = 12;
@@ -13,8 +14,13 @@ const MarginWarning = memo(function MarginWarning({
   lighterUsdc,
   positionSize,
   markPrice,
-}: { lighterUsdc: number; positionSize: number; markPrice: number }) {
-  const posUsdValue = positionSize * markPrice;
+  eurPosition,
+}: { lighterUsdc: number; positionSize: number; markPrice: number; eurPosition?: LighterPosition }) {
+  // For EUR hedges, collateral covers both the XMR short and the EUR long.
+  // Sum both notionals so margin% reflects true exposure.
+  const xmrUsdValue = positionSize * markPrice;
+  const eurUsdValue = eurPosition ? eurPosition.size * eurPosition.markPrice : 0;
+  const posUsdValue = xmrUsdValue + eurUsdValue;
   if (posUsdValue <= 0 || lighterUsdc <= 0) return null;
   const marginPct = (lighterUsdc / posUsdValue) * 100;
   if (marginPct >= WARN_MARGIN_PCT) return null;
@@ -88,11 +94,11 @@ export function HedgeScreen() {
   const [ethUsdcBalance, setEthUsdcBalance] = useState<number>(0);
   const [forcedEthRecovery, setForcedEthRecovery] = useState<number>(0);
   const [recoverInstead, setRecoverInstead] = useState(false);
+  const [eurMarket, setEurMarket] = useState<LighterMarketInfo | null>(null);
 
   useEffect(() => {
-    getXmrMarketInfo()
-      .then(setLighterMarket)
-      .catch(() => {});
+    getXmrMarketInfo().then(setLighterMarket).catch(() => {});
+    getEurMarketInfo().then(setEurMarket).catch(() => {});
   }, [setLighterMarket]);
 
   // Poll Ethereum mainnet USDC balance every 30s when not hedged and Lighter is empty.
@@ -113,12 +119,14 @@ export function HedgeScreen() {
 
   async function refreshHedgeStatus() {
     try {
-      const [status, market] = await Promise.all([
+      const [status, market, eur] = await Promise.all([
         getHedgeStatus(ethWallet?.address),
         getXmrMarketInfo(),
+        getEurMarketInfo(),
       ]);
       setHedgeStatus(status);
       setLighterMarket(market);
+      setEurMarket(eur);
     } catch { /* ignore */ }
   }
 
@@ -128,7 +136,7 @@ export function HedgeScreen() {
         <button className="back-btn" onClick={() => navigate('home')}>
           ← Back
         </button>
-        <h1>Lock USD Value</h1>
+        <h1>Lock {hedgeStatus?.hedgeCurrency === 'EUR' ? 'EUR' : 'USD'} Value</h1>
       </div>
 
       {/* Description — only shown when not yet hedged */}
@@ -151,9 +159,15 @@ export function HedgeScreen() {
       {lighterMarket && (
         <div className="hedge-screen__market">
           <div className="market-stat">
-            <span className="market-stat__label">Mark Price</span>
+            <span className="market-stat__label">XMR/USD</span>
             <span className="market-stat__value">${lighterMarket.markPrice.toFixed(2)}</span>
           </div>
+          {hedgeStatus?.hedgeCurrency === 'EUR' && eurMarket && (
+            <div className="market-stat">
+              <span className="market-stat__label">EUR/USD</span>
+              <span className="market-stat__value">{eurMarket.markPrice.toFixed(4)}</span>
+            </div>
+          )}
           {/* When bot is active show realised APY; otherwise show current funding rate */}
           {botActive ? (
             <div className="market-stat market-stat--green">
@@ -237,6 +251,14 @@ export function HedgeScreen() {
                     <span>{hedgeStatus.position.size.toFixed(4)} XMR</span>
                   </div>
                   <div className="hedge-pos__row">
+                    <span>Locked value</span>
+                    <span>
+                      {hedgeStatus.hedgeCurrency === 'EUR'
+                        ? `€${hedgeStatus.lockedEurValue?.toFixed(2) ?? '—'}`
+                        : `$${hedgeStatus.lockedUsdValue?.toFixed(2) ?? '—'}`}
+                    </span>
+                  </div>
+                  <div className="hedge-pos__row">
                     <span>USDC</span>
                     <span>
                       ${hedgeStatus.lighterUsdc?.toFixed(2) ?? '—'}
@@ -261,6 +283,7 @@ export function HedgeScreen() {
                   lighterUsdc={hedgeStatus.lighterUsdc ?? 0}
                   positionSize={hedgeStatus.position?.size ?? 0}
                   markPrice={hedgeStatus.position?.markPrice ?? 0}
+                  eurPosition={hedgeStatus.eurPosition}
                 />
               )}
 

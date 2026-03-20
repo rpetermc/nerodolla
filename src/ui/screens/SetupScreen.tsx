@@ -4,7 +4,7 @@
  * which encrypts the mnemonic in localStorage for fast future unlocks.
  */
 import { useState } from 'react';
-import { useWalletStore } from '../../store/wallet';
+import { useWalletStore, useSettingsStore } from '../../store/wallet';
 import { generateMnemonic, mnemonicToSeed, xmrSeedFromMaster, ethSeedFromMaster } from '../../wallet/seed';
 import { deriveXmrKeys } from '../../wallet/xmr';
 import { deriveEthWallet } from '../../wallet/eth';
@@ -24,6 +24,7 @@ interface DerivedWallet {
 
 export function SetupScreen() {
   const { setKeys, setWalletCreatedHeight, setError } = useWalletStore();
+  const { updateSettings } = useSettingsStore();
 
   const [mode, setMode]               = useState<SetupMode>('welcome');
   const [mnemonic, setMnemonic]       = useState('');
@@ -51,8 +52,10 @@ export function SetupScreen() {
 
     if (restoreHeight !== undefined) {
       setWalletCreatedHeight(restoreHeight);
+      updateSettings({ walletRestoreHeight: restoreHeight });
     } else if (createdHeight !== null) {
       setWalletCreatedHeight(createdHeight);
+      updateSettings({ walletRestoreHeight: createdHeight });
     }
 
     return { mnemonic: phrase, xmrKeys, ethWallet };

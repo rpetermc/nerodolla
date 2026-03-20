@@ -4,9 +4,10 @@ import { useWalletStore, useSettingsStore } from '../../store/wallet';
 import { BalanceCard } from '../components/BalanceCard';
 import { HedgeToggle } from '../components/HedgeToggle';
 import { TxList } from '../components/TxList';
-import { getAddressInfo, getAddressTxs, createSubaddress } from '../../backend/lws';
+import { loginLws, getAddressInfo, getAddressTxs, createSubaddress } from '../../backend/lws';
 import { getHedgeStatus, getXmrMarketInfo, closeHedgeAndWithdraw } from '../../backend/lighter';
 import { fetchArbUsdcBalance } from '../../backend/wagyu';
+import { initWasmWallet, syncWasmWallet, getWasmAddressInfo, getWasmTxs } from '../../backend/wasm-wallet';
 
 export function HomeScreen() {
   const {
@@ -15,7 +16,10 @@ export function HomeScreen() {
     ethWallet,
     swapStep,
     hedgeStatus,
+    syncProgress,
+    walletCreatedHeight,
     setSyncing,
+    setSyncProgress,
     setXmrInfo,
     setTransactions,
     setLastSyncAt,
@@ -26,11 +30,11 @@ export function HomeScreen() {
     navigate,
   } = useWalletStore();
 
-  const { lwsEndpoint, lighterProxyUrl } = useSettingsStore();
+  const { xmrSyncMode, remoteLwsUrl, nodeUrl, walletRestoreHeight, lighterProxyUrl } = useSettingsStore();
   // On Android there is no Vite proxy — use the configured proxy server directly.
-  const effectiveLwsEndpoint = Capacitor.isNativePlatform()
+  const effectiveLwsUrl = Capacitor.isNativePlatform()
     ? `${lighterProxyUrl.replace(/\/$/, '')}/lws`
-    : lwsEndpoint;
+    : remoteLwsUrl;
   const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [isClosingHedge, setIsClosingHedge] = useState(false);
@@ -40,10 +44,29 @@ export function HomeScreen() {
     setSyncing(true);
     setSyncError(null);
     try {
-      const lwsCfg = { baseUrl: effectiveLwsEndpoint };
-      const [info, txData, hedgeStatusResult, market] = await Promise.all([
-        getAddressInfo(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
-        getAddressTxs(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
+      let info, txData;
+      if (xmrSyncMode === 'wasm-node') {
+        await initWasmWallet(
+          xmrKeys.primaryAddress,
+          xmrKeys.viewKeyPrivate,
+          xmrKeys.spendKeyPrivate,
+          walletCreatedHeight ?? walletRestoreHeight ?? 0,
+          nodeUrl,
+          (p) => setSyncProgress(p),
+        );
+        await syncWasmWallet();
+        setSyncProgress(null);
+        [info, txData] = await Promise.all([getWasmAddressInfo(), getWasmTxs()]);
+      } else {
+        const lwsCfg = { baseUrl: effectiveLwsUrl };
+        await loginLws(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate);
+        [info, txData] = await Promise.all([
+          getAddressInfo(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
+          getAddressTxs(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
+        ]);
+      }
+
+      const [hedgeStatusResult, market] = await Promise.all([
         getHedgeStatus(ethWallet?.address).catch(() => null),
         getXmrMarketInfo().catch(() => null),
       ]);
@@ -79,13 +102,12 @@ export function HomeScreen() {
         }
       }
     } catch (err) {
-      // LWS sync failures are non-blocking — wallet is still fully usable.
-      // Show a soft indicator rather than a global error banner.
+      setSyncProgress(null);
       setSyncError(err instanceof Error ? err.message : 'Sync unavailable');
     } finally {
       setSyncing(false);
     }
-  }, [xmrKeys, ethWallet, effectiveLwsEndpoint, setSyncing, setXmrInfo, setTransactions, setLastSyncAt, setUsdcBalance, setHedgeStatus, setLighterMarket]);
+  }, [xmrKeys, ethWallet, xmrSyncMode, effectiveLwsUrl, nodeUrl, walletRestoreHeight, setSyncing, setSyncProgress, setXmrInfo, setTransactions, setLastSyncAt, setUsdcBalance, setHedgeStatus, setLighterMarket]);
 
   // Initial sync + periodic refresh every 60 seconds
   useEffect(() => {
@@ -121,6 +143,19 @@ export function HomeScreen() {
 
   return (
     <div className="screen home-screen">
+      {syncProgress && (
+        <div className="wasm-sync-bar">
+          <div className="wasm-sync-bar__label">
+            Scanning blockchain… {syncProgress.percent}%
+            <span className="wasm-sync-bar__heights">
+              {syncProgress.current.toLocaleString()} / {syncProgress.target.toLocaleString()}
+            </span>
+          </div>
+          <div className="wasm-sync-bar__track">
+            <div className="wasm-sync-bar__fill" style={{ width: `${syncProgress.percent}%` }} />
+          </div>
+        </div>
+      )}
       {syncError && (
         <div className="sync-error-bar" title={syncError}>
           ⚠ {syncError}

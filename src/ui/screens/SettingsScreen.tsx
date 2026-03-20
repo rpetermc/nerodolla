@@ -1,18 +1,51 @@
 import { useState } from 'react';
 import { useWalletStore, useSettingsStore } from '../../store/wallet';
+import type { XmrSyncMode } from '../../store/wallet';
 import { pingLws } from '../../backend/lws';
 import { initWalletConnect, pair, disconnectSession } from '../../backend/walletconnect';
 
+const DEFAULT_LWS_URL = '/lws';
+
+const LWS_OPTIONS = [
+  { label: 'Nerodolla Server', value: DEFAULT_LWS_URL },
+  { label: 'Custom…', value: 'custom' },
+];
+
+const PFN_OPTIONS = [
+  { label: 'node.sethforprivacy.com', value: 'https://node.sethforprivacy.com' },
+  { label: 'xmr-node.cakewallet.com', value: 'https://xmr-node.cakewallet.com:18081' },
+  { label: 'nodes.hashvault.pro', value: 'https://nodes.hashvault.pro:18081' },
+  { label: 'monero.stackwallet.com', value: 'https://monero.stackwallet.com:18081' },
+  { label: 'Custom…', value: 'custom' },
+];
+
 export function SettingsScreen() {
   const { navigate, lock, wcSession, setWcSession } = useWalletStore();
-  const { lwsEndpoint, lighterProxyUrl, network, ethRpcUrl, updateSettings } =
-    useSettingsStore();
+  const {
+    xmrSyncMode, remoteLwsUrl, nodeUrl, lighterProxyUrl, network, ethRpcUrl, updateSettings,
+  } = useSettingsStore();
 
-  const [lwsInput, setLwsInput] = useState(lwsEndpoint);
+  const [syncMode, setSyncMode] = useState<XmrSyncMode>(xmrSyncMode);
+  const [lwsUrl, setLwsUrl] = useState(remoteLwsUrl);
+  const [pfnUrl, setPfnUrl] = useState(nodeUrl);
   const [proxyInput, setProxyInput] = useState(lighterProxyUrl);
+  const [saved, setSaved] = useState(false);
+
+  // LWS dropdown selection
+  const [lwsSelected, setLwsSelected] = useState<string>(() =>
+    LWS_OPTIONS.find(o => o.value === remoteLwsUrl && o.value !== 'custom')
+      ? remoteLwsUrl
+      : 'custom'
+  );
+  // PFN dropdown selection
+  const [pfnSelected, setPfnSelected] = useState<string>(() =>
+    PFN_OPTIONS.find(o => o.value === nodeUrl && o.value !== 'custom')
+      ? nodeUrl
+      : 'custom'
+  );
+
   const [lwsPingResult, setLwsPingResult] = useState<boolean | null>(null);
   const [isPinging, setIsPinging] = useState(false);
-  const [saved, setSaved] = useState(false);
 
   const [wcUri, setWcUri] = useState('');
   const [wcConnecting, setWcConnecting] = useState(false);
@@ -32,7 +65,6 @@ export function SettingsScreen() {
       await initWalletConnect(projectId);
       await pair(trimmed);
       setWcUri('');
-      // Session proposal will appear via the WalletConnectModal overlay
     } catch (err) {
       setWcError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -47,16 +79,25 @@ export function SettingsScreen() {
     }
   }
 
-  async function handlePingLws() {
+  async function handleTestLws() {
     setIsPinging(true);
     setLwsPingResult(null);
-    const ok = await pingLws(lwsInput);
+    const url = lwsSelected !== 'custom' ? lwsSelected : lwsUrl;
+    const ok = await pingLws(url);
     setLwsPingResult(ok);
     setIsPinging(false);
   }
 
   function handleSave() {
-    updateSettings({ lwsEndpoint: lwsInput, lighterProxyUrl: proxyInput });
+    const effectiveLws = lwsSelected !== 'custom' ? lwsSelected : lwsUrl;
+    const effectivePfn = pfnSelected !== 'custom' ? pfnSelected : pfnUrl;
+    updateSettings({
+      xmrSyncMode: syncMode,
+      remoteLwsUrl: effectiveLws,
+      lwsEndpoint: effectiveLws,
+      nodeUrl: effectivePfn,
+      lighterProxyUrl: proxyInput,
+    });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
@@ -74,23 +115,113 @@ export function SettingsScreen() {
         <h2 className="settings-section__title">Network</h2>
 
         <div className="settings-row">
-          <label className="settings-label">monero-lws Endpoint</label>
-          <input
-            className="settings-input"
-            value={lwsInput}
-            onChange={(e) => setLwsInput(e.target.value)}
-            placeholder="/lws"
-          />
-          <div className="settings-row__actions">
-            <button className="btn btn--ghost btn--sm" onClick={handlePingLws} disabled={isPinging}>
-              {isPinging ? 'Testing…' : 'Test'}
-            </button>
-            {lwsPingResult === true && <span className="settings-ping settings-ping--ok">✓ OK</span>}
-            {lwsPingResult === false && <span className="settings-ping settings-ping--err">✗ Unreachable</span>}
+          <label className="settings-label">XMR Sync Mode</label>
+          <div className="settings-mode-options">
+            <label className={`settings-mode-option${syncMode === 'remote-lws' ? ' settings-mode-option--active' : ''}`}>
+              <input
+                type="radio"
+                name="xmrSyncMode"
+                checked={syncMode === 'remote-lws'}
+                onChange={() => { setSyncMode('remote-lws'); setLwsPingResult(null); }}
+              />
+              <div className="settings-mode-option__body">
+                <span className="settings-mode-option__title">
+                  LWS Server <span className="settings-mode-option__badge">Fastest</span>
+                </span>
+                <span className="settings-hint">
+                  Syncs via a Light Wallet Server. Fast and battery-friendly. Your view key is
+                  shared with the server — they can see your balance but cannot spend.
+                </span>
+              </div>
+            </label>
+
+            <label className={`settings-mode-option${syncMode === 'wasm-node' ? ' settings-mode-option--active' : ''}`}>
+              <input
+                type="radio"
+                name="xmrSyncMode"
+                checked={syncMode === 'wasm-node'}
+                onChange={() => { setSyncMode('wasm-node'); setLwsPingResult(null); }}
+              />
+              <div className="settings-mode-option__body">
+                <span className="settings-mode-option__title">
+                  Public Full Node{' '}
+                  <span className="settings-mode-option__badge settings-mode-option__badge--privacy">
+                    Best Privacy
+                  </span>
+                </span>
+                <span className="settings-hint">
+                  Your view key never leaves your browser — scanning happens locally in WASM.
+                  Slower initial sync. Similar to Cake Wallet's remote node mode.
+                </span>
+              </div>
+            </label>
           </div>
-          <span className="settings-hint">
-            Self-hosted via proxy — leave as <code>/lws</code> unless overriding.
-          </span>
+
+          {syncMode === 'remote-lws' && (
+            <div className="settings-remote-lws">
+              <select
+                className="settings-select"
+                value={lwsSelected}
+                onChange={e => {
+                  const v = e.target.value;
+                  setLwsSelected(v);
+                  if (v !== 'custom') { setLwsUrl(v); setLwsPingResult(null); }
+                }}
+              >
+                {LWS_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {lwsSelected === 'custom' && (
+                <input
+                  className="settings-input"
+                  value={lwsUrl}
+                  onChange={e => { setLwsUrl(e.target.value); setLwsPingResult(null); }}
+                  placeholder="https://your-lws-server.example.com"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+              )}
+              <div className="settings-row__actions">
+                <button className="btn btn--ghost btn--sm" onClick={handleTestLws} disabled={isPinging}>
+                  {isPinging ? 'Testing…' : 'Test'}
+                </button>
+                {lwsPingResult === true && <span className="settings-ping settings-ping--ok">✓ OK</span>}
+                {lwsPingResult === false && <span className="settings-ping settings-ping--err">✗ Unreachable</span>}
+              </div>
+            </div>
+          )}
+
+          {syncMode === 'wasm-node' && (
+            <div className="settings-remote-lws">
+              <select
+                className="settings-select"
+                value={pfnSelected}
+                onChange={e => {
+                  const v = e.target.value;
+                  setPfnSelected(v);
+                  if (v !== 'custom') setPfnUrl(v);
+                }}
+              >
+                {PFN_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {pfnSelected === 'custom' && (
+                <input
+                  className="settings-input"
+                  value={pfnUrl}
+                  onChange={e => setPfnUrl(e.target.value)}
+                  placeholder="https://your-node.example.com:18081"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+              )}
+              <span className="settings-hint">
+                All listed nodes have CORS enabled and are community-trusted.
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="settings-row">
@@ -99,7 +230,7 @@ export function SettingsScreen() {
             className="settings-input"
             value={proxyInput}
             onChange={(e) => setProxyInput(e.target.value)}
-            placeholder={import.meta.env.VITE_PROXY_URL || "https://proxy.example.com"}
+            placeholder={import.meta.env.VITE_PROXY_URL || 'https://proxy.example.com'}
             autoCapitalize="none"
             autoCorrect="off"
           />
@@ -113,9 +244,7 @@ export function SettingsScreen() {
           <select
             className="settings-select"
             value={network}
-            onChange={(e) =>
-              updateSettings({ network: e.target.value as 'mainnet' | 'stagenet' })
-            }
+            onChange={(e) => updateSettings({ network: e.target.value as 'mainnet' | 'stagenet' })}
           >
             <option value="mainnet">Mainnet</option>
             <option value="stagenet">Stagenet (testing)</option>

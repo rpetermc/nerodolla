@@ -17,6 +17,7 @@ import type { EthWallet } from '../wallet/eth';
 import type { LwsAddressInfo, LwsTransaction } from '../backend/lws';
 import type { WagyuOrder } from '../backend/wagyu';
 import type { HedgeStatus, LighterMarketInfo } from '../backend/lighter';
+import type { SyncProgress } from '../backend/wasm-wallet';
 import type { SignClientTypes, SessionTypes } from '@walletconnect/types';
 
 // ── Swap persistence ───────────────────────────────────────────────────────────
@@ -96,6 +97,9 @@ export interface WalletState {
   swapOrders: WagyuOrder[];
   swapError: string | null;
 
+  // ── WASM sync progress ──
+  syncProgress: SyncProgress | null;
+
   // ── Hedge state ──
   hedgeStatus: HedgeStatus | null;
   lighterMarket: LighterMarketInfo | null;
@@ -120,6 +124,7 @@ export interface WalletActions {
   lock: () => void;
 
   // Balances
+  setSyncProgress: (progress: SyncProgress | null) => void;
   setXmrInfo: (info: LwsAddressInfo) => void;
   setTransactions: (txs: LwsTransaction[]) => void;
   setSyncing: (syncing: boolean) => void;
@@ -183,6 +188,8 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
   swapOrders: [],
   swapError: null,
 
+  syncProgress: null,
+
   hedgeStatus: null,
   lighterMarket: null,
   isHedgeLoading: false,
@@ -217,12 +224,14 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
       walletCreatedHeight: null,
       receiveAddress: null,
       receiveAddressIndex: 0,
+      syncProgress: null,
       hedgeStatus: null,
       lighterMarket: null,
       sessionToken: null,
       activeScreen: 'setup',
     }),
 
+  setSyncProgress: (progress) => set({ syncProgress: progress }),
   setXmrInfo: (info) => set({ xmrInfo: info }),
   setTransactions: (txs) => set({ transactions: txs }),
   setSyncing: (syncing) => set({ isSyncing: syncing }),
@@ -261,12 +270,21 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
 
 // ── Settings store (persisted) ────────────────────────────────────────────────
 
+export type XmrSyncMode = 'remote-lws' | 'wasm-node';
+
 export interface SettingsState {
-  lwsEndpoint: string;
+  lwsEndpoint: string;           // kept for migration compat
+  xmrSyncMode: XmrSyncMode;
+  remoteLwsUrl: string;
+  nodeUrl: string;               // public full node URL for wasm-node mode
+  walletRestoreHeight: number | null;
   network: 'mainnet' | 'stagenet';
   ethRpcUrl: string;
   lighterProxyUrl: string;
   currency: 'USD' | 'EUR' | 'BTC';
+  /** Preferred hedge currency for new hedges — 'USD' or 'EUR'. Source of truth for open flow;
+   *  live hedgeCurrency is derived from actual positions in getHedgeStatus(). */
+  hedgeCurrency: 'USD' | 'EUR';
 }
 
 export interface SettingsActions {
@@ -277,16 +295,21 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
   persist(
     (set) => ({
       lwsEndpoint: '/lws',
+      xmrSyncMode: 'remote-lws' as XmrSyncMode,
+      remoteLwsUrl: '/lws',
+      nodeUrl: 'https://node.sethforprivacy.com',
+      walletRestoreHeight: null,
       network: 'mainnet',
       ethRpcUrl: 'https://rpc.ankr.com/eth',
       lighterProxyUrl: import.meta.env.VITE_PROXY_URL || 'https://proxy.example.com',
       currency: 'USD',
+      hedgeCurrency: 'USD',
 
       updateSettings: (patch) => set((s) => ({ ...s, ...patch })),
     }),
     {
       name: 'nerodolla-settings',
-      version: 3,
+      version: 7,
       migrate(stored: unknown) {
         const s = stored as Record<string, unknown>;
         // v1→v2: revert dead public LWS URLs back to proxy routing
@@ -299,6 +322,26 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         // v2→v3: remove dead integrator fee fields
         delete s.integratorAddress;
         delete s.integratorFeeBps;
+        // v3→v4: add hedgeCurrency preference (default USD)
+        if (!s.hedgeCurrency) s.hedgeCurrency = 'USD';
+        // v4→v5: add xmrSyncMode and related fields
+        const defaultLws = import.meta.env.VITE_PROXY_URL
+          ? `${import.meta.env.VITE_PROXY_URL}/lws`
+          : '/lws';
+        if (!s.xmrSyncMode) {
+          const lws = s.lwsEndpoint as string | undefined;
+          s.xmrSyncMode = 'remote-lws';
+          s.remoteLwsUrl = lws && lws !== '/lws' ? lws : defaultLws;
+        }
+        if (s.xmrSyncMode === 'local') s.xmrSyncMode = 'remote-lws';
+        if (!s.remoteLwsUrl) s.remoteLwsUrl = defaultLws;
+        if (!s.nodeUrl) s.nodeUrl = 'https://node.sethforprivacy.com';
+        // v5→v6: add walletRestoreHeight
+        if (s.walletRestoreHeight === undefined) s.walletRestoreHeight = null;
+        // v6→v7: ensure remoteLwsUrl is relative (web-compatible); Android overrides anyway
+        if (!s.remoteLwsUrl || (s.remoteLwsUrl as string).startsWith('http')) {
+          s.remoteLwsUrl = '/lws';
+        }
         return s;
       },
     }

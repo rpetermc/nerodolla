@@ -72,11 +72,13 @@ export async function renewSession(): Promise<boolean> {
   }
 }
 
+export type HedgeCurrency = 'USD' | 'EUR';
+
 export interface LighterPosition {
   symbol: string;          // e.g. 'XMR-USD'
   side: 'LONG' | 'SHORT';
-  size: number;            // in XMR
-  entryPrice: number;      // USD per XMR
+  size: number;            // base units (XMR for XMR-USD; EUR for EUR-USD)
+  entryPrice: number;      // quote per base
   markPrice: number;       // current mark price
   unrealizedPnl: number;   // USD
   marginUsed: number;      // USDC collateral in use
@@ -94,10 +96,13 @@ export interface LighterAccount {
 
 export interface HedgeStatus {
   isHedged: boolean;
-  position?: LighterPosition;
+  position?: LighterPosition;       // XMR-USD SHORT leg
+  eurPosition?: LighterPosition;    // EUR-USD LONG leg (present when hedgeCurrency === 'EUR')
+  hedgeCurrency?: HedgeCurrency;    // derived from live positions — 'EUR' if eurPosition exists
   lockedUsdValue?: number;
-  fundingEarnedToday?: number; // USD
-  lighterUsdc?: number;        // total USDC collateral on Lighter
+  lockedEurValue?: number;          // lockedUsdValue / EUR-USD mark price
+  fundingEarnedToday?: number;      // USD
+  lighterUsdc?: number;             // total USDC collateral on Lighter
 }
 
 // ── Internal ─────────────────────────────────────────────────────────────────
@@ -161,10 +166,22 @@ export async function getHedgeStatus(ethAddress?: string): Promise<HedgeStatus> 
     return { isHedged: false, lighterUsdc: account.totalCollateral };
   }
 
+  // Detect EUR hedge: a LONG EUR-USD position alongside the XMR short
+  const eurPos = account.positions.find(
+    (p) => p.symbol === 'EUR-USD' && p.side === 'LONG'
+  );
+  const hedgeCurrency: HedgeCurrency = eurPos ? 'EUR' : 'USD';
+  const lockedEurValue = eurPos && eurPos.markPrice > 0
+    ? xmrPos.lockedUsdValue / eurPos.markPrice
+    : undefined;
+
   return {
     isHedged: true,
     position: xmrPos,
+    eurPosition: eurPos,
+    hedgeCurrency,
     lockedUsdValue: xmrPos.lockedUsdValue,
+    lockedEurValue,
     lighterUsdc: account.totalCollateral,
     fundingEarnedToday: undefined,
   };
@@ -179,6 +196,8 @@ export interface DepositAndHedgeParams {
   xmrSize?: string;
   /** Slippage tolerance in bps (default 50 = 0.5%) */
   slippageBps?: number;
+  /** Target hedge currency — 'USD' (default) or 'EUR'. Proxy opens EUR-USD LONG alongside XMR short. */
+  currency?: HedgeCurrency;
 }
 
 export interface HedgeResult {
@@ -205,6 +224,7 @@ export async function depositAndOpenHedge(
       usdc_amount: params.usdcAmount,
       xmr_size: params.xmrSize,
       slippage_bps: params.slippageBps ?? 50,
+      currency: params.currency ?? 'USD',
     }),
   });
 }
@@ -298,6 +318,14 @@ export interface LighterMarketInfo {
  */
 export async function getXmrMarketInfo(): Promise<LighterMarketInfo> {
   return proxyFetch<LighterMarketInfo>('/market/XMR-USD');
+}
+
+/**
+ * Get current EUR-USD market data from Lighter (via proxy).
+ * Used when the user selects EUR as their hedge currency.
+ */
+export async function getEurMarketInfo(): Promise<LighterMarketInfo> {
+  return proxyFetch<LighterMarketInfo>('/market/EUR-USD');
 }
 
 // ── Account setup ─────────────────────────────────────────────────────────────

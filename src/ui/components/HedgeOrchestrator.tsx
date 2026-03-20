@@ -7,7 +7,7 @@
  *        → opening → live | error
  */
 import { useState, useRef, useEffect } from 'react';
-import { useWalletStore } from '../../store/wallet';
+import { useWalletStore, useSettingsStore } from '../../store/wallet';
 import { getDepositIntentAddress } from '../../backend/deposit';
 import {
   getQuote,
@@ -27,8 +27,9 @@ import {
   getDepositStatus,
   reRegisterZkKey,
   startBot,
+  getEurMarketInfo,
 } from '../../backend/lighter';
-import type { LighterSigningData } from '../../backend/lighter';
+import type { LighterSigningData, HedgeCurrency } from '../../backend/lighter';
 import { signMessage } from '../../wallet/eth';
 import { saveZkKey } from '../../wallet/keystore';
 import { setProxySessionToken, renewSession } from '../../backend/lighter';
@@ -96,6 +97,7 @@ function maxHedgeableXmr(usdcAvailable: number, markPrice: number): number {
 
 export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestratorProps) {
   const { xmrKeys, ethWallet, xmrInfo, walletCreatedHeight, setSessionToken, lighterMarket } = useWalletStore();
+  const { hedgeCurrency: currencyPref, updateSettings } = useSettingsStore();
 
   const [step, setStep]                   = useState<OrchestratorStep>('idle');
   const [pct, setPct]                     = useState(20);   // % of spendable balance
@@ -110,6 +112,18 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const [isResumed, setIsResumed]         = useState(false); // true when restored from localStorage
   const [mode, setMode]                   = useState<'simple' | 'bot'>('simple');
   const [pendingRecoveryStep, setPendingRecoveryStep] = useState<'usdc_ready' | 'deposit_pending' | null>(null);
+  const [currency, setCurrencyState]      = useState<HedgeCurrency>(currencyPref ?? 'USD');
+  const [eurRate, setEurRate]             = useState<number | null>(null); // EUR/USD mark price
+
+  function setCurrency(c: HedgeCurrency) {
+    setCurrencyState(c);
+    currencyRef.current = c;
+    updateSettings({ hedgeCurrency: c });
+    // Fetch EUR rate lazily when user first selects EUR
+    if (c === 'EUR' && eurRate === null) {
+      getEurMarketInfo().then(m => setEurRate(m.markPrice)).catch(() => {});
+    }
+  }
 
   // Refs for values accessed inside interval callbacks
   const pollRef          = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -119,6 +133,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const isNewAccountRef  = useRef(false);
   const signingDataRef   = useRef<LighterSigningData | null>(null);
   const modeRef          = useRef<'simple' | 'bot'>('simple');
+  const currencyRef      = useRef<HedgeCurrency>(currencyPref ?? 'USD');
 
   // Resume in-flight bridge if the app was locked mid-flow, or auto-check when
   // we already know USDC is waiting in Lighter (preCheck prop).
@@ -333,7 +348,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     setStep('opening');
     try {
       const xmrSize = usdcReadyHedgeXmr > 0 ? usdcReadyHedgeXmr : maxXmr;
-      const result = await depositAndOpenHedge({ usdcAmount: usdcReady.toFixed(2), xmrSize: xmrSize.toFixed(6) });
+      const result = await depositAndOpenHedge({ usdcAmount: usdcReady.toFixed(2), xmrSize: xmrSize.toFixed(6), currency: currencyRef.current });
       if (!result.success) throw new Error(result.error ?? 'Open hedge failed');
       await waitForPositionThenComplete();
     } catch (err) {
@@ -503,7 +518,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         doOpenHedge(order, detail);
       } else {
         // Recovery path: USDC already in Lighter, open hedge directly
-        const result2 = await depositAndOpenHedge({ usdcAmount: usdcReady.toFixed(2), xmrSize: maxXmr.toFixed(6) });
+        const result2 = await depositAndOpenHedge({ usdcAmount: usdcReady.toFixed(2), xmrSize: maxXmr.toFixed(6), currency: currencyRef.current });
         if (!result2.success) throw new Error(result2.error ?? 'Open hedge failed');
         await waitForPositionThenComplete();
       }
@@ -528,7 +543,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       // Cap position size to what the USDC can safely margin at 10x leverage
       const safeXmr = Math.min(maxXmr, maxHedgeableXmr(usdcFloat, markPrice));
       const xmrSize = (safeXmr > 0 ? safeXmr : maxXmr).toFixed(6);
-      const result = await depositAndOpenHedge({ usdcAmount, xmrSize });
+      const result = await depositAndOpenHedge({ usdcAmount, xmrSize, currency: currencyRef.current });
       if (!result.success) throw new Error(result.error ?? 'Open hedge failed');
       await waitForPositionThenComplete();
     } catch (err) {
@@ -589,6 +604,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       const result = await depositAndOpenHedge({
         usdcAmount: usdc.toFixed(2),
         xmrSize: (safeXmr > 0 ? safeXmr : maxXmr).toFixed(6),
+        currency: currencyRef.current,
       });
       if (!result.success) throw new Error(result.error ?? 'Open hedge failed');
       await waitForPositionThenComplete();
@@ -768,8 +784,25 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   }
 
   if (step === 'slider') {
+    const eurLockValue = currency === 'EUR' && eurRate && quote
+      ? (Number(quote.minReceived) / eurRate).toFixed(2)
+      : null;
     return (
       <div className="hedge-orch">
+        <div className="hedge-orch__currency-toggle">
+          <button
+            className={`hedge-orch__currency-btn${currency === 'USD' ? ' hedge-orch__currency-btn--active' : ''}`}
+            onClick={() => setCurrency('USD')}
+          >
+            $ USD
+          </button>
+          <button
+            className={`hedge-orch__currency-btn${currency === 'EUR' ? ' hedge-orch__currency-btn--active' : ''}`}
+            onClick={() => setCurrency('EUR')}
+          >
+            € EUR
+          </button>
+        </div>
         <div className="hedge-orch__slider-row">
           <input
             className="hedge-orch__slider"
@@ -795,7 +828,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           <div className="hedge-orch__quote">
             {xmrFromPct.toFixed(4)} XMR
             {quote
-              ? <> → <strong>{quote.minReceived} USDC</strong> min</>
+              ? <> → <strong>{quote.minReceived} USDC</strong> min
+                  {eurLockValue && <> ≈ <strong>€{eurLockValue}</strong> locked</>}
+                </>
               : <> — fetching quote…</>}
           </div>
         )}
@@ -829,6 +864,10 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           <div className="hedge-orch__review-row">
             <span>Bridge</span>
             <span>wagyu.xyz</span>
+          </div>
+          <div className="hedge-orch__review-row">
+            <span>Lock value in</span>
+            <span>{currency === 'EUR' ? '€ EUR' : '$ USD'}</span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -959,7 +998,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         <div style={{ color: 'var(--color-green)', fontWeight: 600, fontSize: 15 }}>
           {mode === 'bot'
             ? '✓ Bot started — building short position via limit orders'
-            : '✓ Hedge active — USD value locked'}
+            : currency === 'EUR'
+              ? '✓ Hedge active — EUR value locked'
+              : '✓ Hedge active — USD value locked'}
         </div>
       </div>
     );

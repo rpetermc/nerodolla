@@ -142,12 +142,31 @@ export async function getAddressInfo(
     pending_balance?: string;
     blockchain_height: number;
     scanned_height: number;
+    spent_outputs?: Array<{ amount: string; tx_pub_key: string; out_index: number; key_image: string }>;
   }>(config, '/get_address_info', { address, view_key: viewKeyPrivate });
 
   const totalReceived  = BigInt(data.total_received  ?? '0');
-  const totalSent      = BigInt(data.total_sent      ?? '0');
   const lockedFunds    = BigInt(data.locked_funds    ?? '0');
   const pendingBalance = BigInt(data.pending_balance ?? '0');
+
+  // monero-lws can return duplicate spent_outputs (same tx_pub_key+out_index,
+  // different key_image) when an account is re-registered. De-duplicate to get
+  // the correct total_sent.
+  let totalSent: bigint;
+  if (data.spent_outputs?.length) {
+    const seen = new Set<string>();
+    let deduped = 0n;
+    for (const so of data.spent_outputs) {
+      const key = `${so.tx_pub_key}:${so.out_index}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped += BigInt(so.amount ?? '0');
+      }
+    }
+    totalSent = deduped;
+  } else {
+    totalSent = BigInt(data.total_sent ?? '0');
+  }
 
   return {
     totalReceived,
@@ -171,7 +190,7 @@ export async function getAddressTxs(
   const data = await lwsFetch<{
     transactions?: Array<{
       id: string;
-      timestamp: number;
+      timestamp: string | number;
       height: number;
       total_received: string;
       total_sent: string;
@@ -185,7 +204,9 @@ export async function getAddressTxs(
 
   const transactions: LwsTransaction[] = (data.transactions ?? []).map((tx) => ({
     id: tx.id,
-    timestamp: tx.timestamp,
+    timestamp: typeof tx.timestamp === 'number'
+      ? tx.timestamp
+      : Math.floor(new Date(tx.timestamp).getTime() / 1000) || 0,
     height: tx.height,
     totalReceived: BigInt(tx.total_received ?? '0'),
     totalSent: BigInt(tx.total_sent ?? '0'),
@@ -228,8 +249,8 @@ export async function pingLws(baseUrl: string, timeoutMs = 5_000): Promise<boole
       body: JSON.stringify({ address: '', view_key: '', amount: '0', mixin: 0, use_dust: false, dust_threshold: '0' }),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    // Any HTTP response (even 4xx) means the server is up
-    return res.status < 500;
+    // Any HTTP response means the server is up (monero-lws returns 500 for invalid test data)
+    return true;
   } catch {
     return false;
   }
