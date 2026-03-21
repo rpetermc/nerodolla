@@ -119,9 +119,19 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     setCurrencyState(c);
     currencyRef.current = c;
     updateSettings({ hedgeCurrency: c });
+    setQuote(null); // Clear stale quote from previous currency
+    // Re-fetch quote for current XMR amount
+    const xmr = maxXmr > 0 ? Math.floor(maxXmr * pct / 100 * 1e6) / 1e6 : 0;
+    if (xmr >= parseFloat(MIN_SWAP_XMR)) fetchQuote(xmr.toFixed(6));
     // Fetch EUR rate lazily when user first selects EUR
     if (c === 'EUR' && eurRate === null) {
-      getEurMarketInfo().then(m => setEurRate(m.markPrice)).catch(() => {});
+      getEurMarketInfo()
+        .then(m => setEurRate(m.markPrice))
+        .catch(() => {
+          setErrorMsg('Could not fetch EUR/USD rate — switching back to USD.');
+          setCurrencyState('USD');
+          currencyRef.current = 'USD';
+        });
     }
   }
 
@@ -287,7 +297,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   async function doStartBot() {
     if (!xmrKeys) return;
     try {
-      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr);
+      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, currencyRef.current);
       localStorage.setItem('nerodolla_bot_active', 'true');
       clearHedgeState();
       setStep('live');
@@ -355,8 +365,20 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       const msg = err instanceof Error ? err.message : '';
       if (msg.includes('401')) {
         const renewed = await renewSession();
-        if (renewed) { setStep('usdc_ready'); return; }
-        setErrorMsg('Session expired — please lock the app and re-enter your PIN.');
+        if (renewed) {
+          // Retry automatically after successful session renewal
+          try {
+            const xmrRetry = usdcReadyHedgeXmr > 0 ? usdcReadyHedgeXmr : maxXmr;
+            const retryResult = await depositAndOpenHedge({ usdcAmount: usdcReady.toFixed(2), xmrSize: xmrRetry.toFixed(6), currency: currencyRef.current });
+            if (!retryResult.success) throw new Error(retryResult.error ?? 'Open hedge failed');
+            await waitForPositionThenComplete();
+            return;
+          } catch {
+            setErrorMsg('Retry after session renewal failed — please try again.');
+          }
+        } else {
+          setErrorMsg('Session expired — please lock the app and re-enter your PIN.');
+        }
       } else {
         setErrorMsg(msg || 'Open hedge failed');
       }
@@ -419,13 +441,10 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         if (detail.status === 'complete') {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
-          if (isNewAccountRef.current) {
-            setStep('awaiting_account');
-            startAccountPolling();
-          } else {
-            setStep('opening');
-            doOpenHedge(order, detail);
-          }
+          clearHedgeState();
+          // USDC should now be in Lighter — run account check which handles
+          // session readiness and transitions to mode_select.
+          runCheck();
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;

@@ -143,7 +143,7 @@ export function HedgeScreen() {
       {!isHedged && (
         <div className="hedge-screen__explainer">
           <p>
-            <strong>How it works:</strong> Nerodolla opens a short XMR/USD
+            <strong>How it works:</strong> NeroHedge opens a short XMR/USD
             position on Lighter.xyz equal to your XMR balance, making your
             portfolio delta-neutral. If XMR drops 20%, you gain 20% on the
             short — your USD value is preserved.
@@ -193,7 +193,8 @@ export function HedgeScreen() {
         // or from a position that was closed externally via the Lighter UI.
         // Default: offer to open the hedge (HedgeOrchestrator handles usdc_ready).
         // Escape hatch: user can tap "Recover as XMR" to swap back instead.
-        const stuckUsdc = !isHedged && (hedgeStatus?.lighterUsdc ?? 0) > 0.01;
+        const botLaunched = localStorage.getItem('nerodolla_bot_active') === 'true';
+        const stuckUsdc = !isHedged && !botLaunched && (hedgeStatus?.lighterUsdc ?? 0) > 0.01;
         if (stuckUsdc && recoverInstead) {
           return (
             <UnhedgeOrchestrator
@@ -309,7 +310,6 @@ export function HedgeScreen() {
 
         // Case 3: Not hedged, no in-progress flow — offer to open hedge.
         // If the bot was started but hasn't built a position yet, show bot status instead.
-        const botLaunched = localStorage.getItem('nerodolla_bot_active') === 'true';
         if (botLaunched) {
           return (
             <>

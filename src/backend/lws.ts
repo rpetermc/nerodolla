@@ -151,8 +151,10 @@ export async function getAddressInfo(
 
   // monero-lws can return duplicate spent_outputs (same tx_pub_key+out_index,
   // different key_image) when an account is re-registered. De-duplicate to get
-  // the correct total_sent.
-  let totalSent: bigint;
+  // the correct total_sent. Only use the deduped value if it's LOWER than the
+  // raw total_sent (dedup fixes overcounting, never undercounting).
+  const rawTotalSent = BigInt(data.total_sent ?? '0');
+  let totalSent = rawTotalSent;
   if (data.spent_outputs?.length) {
     const seen = new Set<string>();
     let deduped = 0n;
@@ -163,9 +165,9 @@ export async function getAddressInfo(
         deduped += BigInt(so.amount ?? '0');
       }
     }
-    totalSent = deduped;
-  } else {
-    totalSent = BigInt(data.total_sent ?? '0');
+    if (deduped < rawTotalSent) {
+      totalSent = deduped;
+    }
   }
 
   return {

@@ -1,7 +1,7 @@
 {
-  "name": "Nerodolla",
-  "short_name": "Nerodolla",
-  "description": "Self-custody XMR wallet with USD lock via Lighter.xyz",
+  "name": "NeroHedge",
+  "short_name": "NeroHedge",
+  "description": "Self-custody XMR wallet with USD/EUR hedge via Lighter.xyz",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",

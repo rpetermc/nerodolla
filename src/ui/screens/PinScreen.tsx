@@ -103,7 +103,7 @@ export function PinScreen() {
     return (
       <div className="screen pin-screen pin-screen--forgot">
         <div className="pin-screen__logo">
-          <h1 className="setup-screen__wordmark">Nerodolla</h1>
+          <h1 className="setup-screen__wordmark">NeroHedge</h1>
         </div>
         <div className="pin-screen__forgot-body">
           <h2>Forgot PIN?</h2>
@@ -131,7 +131,21 @@ export function PinScreen() {
   return (
     <div className="screen pin-screen">
       <div className="pin-screen__logo">
-        <h1 className="setup-screen__wordmark">Nerodolla</h1>
+        <svg className="pin-screen__n-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="72" height="72">
+          <defs><clipPath id="pinlogo"><circle cx="32" cy="32" r="32"/></clipPath></defs>
+          <circle cx="32" cy="32" r="31" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2"/>
+          <circle cx="32" cy="32" r="31" fill="#ff6600"/>
+          <g clipPath="url(#pinlogo)">
+            <polygon points="22,10 52,54 52,10 64,10 64,64 0,64 0,46 22,46" fill="#2d2d2d"/>
+            <rect x="12" y="10" width="10" height="44" fill="white"/>
+            <polygon points="12,10 22,10 52,54 42,54" fill="white"/>
+            <rect x="42" y="10" width="10" height="44" fill="white"/>
+            <rect x="0" y="46" width="22" height="8" fill="white"/>
+            <rect x="42" y="10" width="22" height="8" fill="white"/>
+          </g>
+        </svg>
+        <h1 className="setup-screen__wordmark">NeroHedge</h1>
+        <p className="pin-screen__tagline"><em>On a long enough timeline, the survival rate for stablecoins drops to zero</em></p>
       </div>
 
       {status === 'verifying' ? (

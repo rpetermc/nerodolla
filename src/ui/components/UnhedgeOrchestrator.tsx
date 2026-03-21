@@ -291,7 +291,9 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           if (saved) savePersist({ ...saved, wagOrderId: order.orderId, wagDepositAddr: order.depositAddress });
           await signAndRelay(order.depositAddress, valueMicro, order.orderId);
         }
-      } catch { /* keep polling */ }
+      } catch (e) {
+        console.warn('startUsdcPolling: fetch error', e instanceof Error ? e.message : e);
+      }
     }, 10_000);
   }
 
@@ -525,6 +527,16 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           Lighter ZK withdrawal typically takes 1–4h.
           You can close the app — progress will resume when you return.
         </p>
+        {ethWallet && (
+          <a
+            href={`https://etherscan.io/address/${ethWallet.address}#tokentxns`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ fontSize: 13, marginTop: 4, display: 'inline-block' }}
+          >
+            Check receiving address on Etherscan
+          </a>
+        )}
         <button
           className="btn btn--ghost"
           style={{ marginTop: 8, fontSize: 13 }}

@@ -22,7 +22,7 @@ export function SwapScreen() {
           .
         </p>
         <div className="swap-screen__fee-note">
-          Nerodolla fee: 0.0% · wagyu protocol fee: ~0.1%
+          NeroHedge fee: 0.0% · wagyu protocol fee: ~0.1%
         </div>
       </div>
 

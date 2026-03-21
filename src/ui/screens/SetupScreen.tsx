@@ -147,8 +147,8 @@ export function SetupScreen() {
     return (
       <div className="screen setup-screen setup-screen--welcome">
         <div className="setup-screen__logo">
-          <h1 className="setup-screen__wordmark">Nerodolla</h1>
-          <p className="setup-screen__tagline">Self-custody XMR · USD-locked savings</p>
+          <h1 className="setup-screen__wordmark">NeroHedge</h1>
+          <p className="setup-screen__tagline">Self-custody XMR · hedged savings</p>
         </div>
         <div className="setup-screen__actions">
           <button
@@ -306,7 +306,7 @@ export function SetupScreen() {
       return (
         <div className="screen setup-screen setup-screen--pin">
           <div className="pin-screen__logo">
-            <h1 className="setup-screen__wordmark">Nerodolla</h1>
+            <h1 className="setup-screen__wordmark">NeroHedge</h1>
           </div>
           <div className="pin-screen__verifying">
             <div className="swap-flow__spinner" />
@@ -319,7 +319,7 @@ export function SetupScreen() {
     return (
       <div className="screen setup-screen setup-screen--pin">
         <div className="pin-screen__logo">
-          <h1 className="setup-screen__wordmark">Nerodolla</h1>
+          <h1 className="setup-screen__wordmark">NeroHedge</h1>
         </div>
         <PinPad
           label={mode === 'pin-set' ? 'Set a PIN to unlock your wallet' : 'Confirm PIN'}

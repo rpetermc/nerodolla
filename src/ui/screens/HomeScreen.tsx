@@ -59,7 +59,7 @@ export function HomeScreen() {
         [info, txData] = await Promise.all([getWasmAddressInfo(), getWasmTxs()]);
       } else {
         const lwsCfg = { baseUrl: effectiveLwsUrl };
-        await loginLws(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate);
+        await loginLws(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate).catch(() => {});
         [info, txData] = await Promise.all([
           getAddressInfo(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
           getAddressTxs(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
@@ -171,20 +171,8 @@ export function HomeScreen() {
       <div className="home-screen__top">
         <BalanceCard onRefresh={sync} />
 
-        {/* Only show hedge UI once we have XMR. Before that, prompt to fund. */}
-        {synced && !hasXmr ? (
-          <div className="home-screen__fund-prompt">
-            <p>Add XMR to get started</p>
-            <div className="home-screen__fund-actions">
-              <button className="btn btn--primary" onClick={() => navigate('receive')}>
-                Receive XMR
-              </button>
-              <button className="btn btn--ghost" onClick={() => navigate('swap')}>
-                Swap crypto → XMR
-              </button>
-            </div>
-          </div>
-        ) : isHedged ? (
+        {/* Hedge status takes priority — user may have 0 XMR after hedging */}
+        {isHedged ? (
           <div className="hedge-status-bar">
             <div className="hedge-status-bar__left">
               <span className="hedge-status-bar__icon">&#x1F512;</span>
@@ -228,6 +216,18 @@ export function HomeScreen() {
           </div>
         ) : hasXmr ? (
           <HedgeToggle />
+        ) : synced ? (
+          <div className="home-screen__fund-prompt">
+            <p>Add XMR to get started</p>
+            <div className="home-screen__fund-actions">
+              <button className="btn btn--primary" onClick={() => navigate('receive')}>
+                Receive XMR
+              </button>
+              <button className="btn btn--ghost" onClick={() => navigate('swap')}>
+                Swap crypto → XMR
+              </button>
+            </div>
+          </div>
         ) : null}
       </div>
 

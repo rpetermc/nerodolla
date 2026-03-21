@@ -27,17 +27,18 @@ let _wallet: unknown = null;
 let _nodeUrl = '';
 const IDB_DB = 'nerodolla-wasm';
 const IDB_STORE = 'wallet-cache';
-const IDB_KEY = 'data-v2'; // v2: full wallet with spend key (v1 was view-only, invalid balances)
+const IDB_KEY_KEYS = 'keys-v3';   // wallet key data (address, view/spend keys)
+const IDB_KEY_CACHE = 'cache-v3'; // blockchain scan cache (sync position + outputs)
 
 // ── IndexedDB helpers ─────────────────────────────────────────────────────────
 
-async function idbSave(data: Uint8Array): Promise<void> {
+async function idbSave(key: string, data: Uint8Array): Promise<void> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_DB, 1);
     req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
     req.onsuccess = () => {
       const tx = req.result.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(data, IDB_KEY);
+      tx.objectStore(IDB_STORE).put(data, key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     };
@@ -45,13 +46,13 @@ async function idbSave(data: Uint8Array): Promise<void> {
   });
 }
 
-async function idbLoad(): Promise<Uint8Array | null> {
+async function idbLoad(key: string): Promise<Uint8Array | null> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_DB, 1);
     req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
     req.onsuccess = () => {
       const tx = req.result.transaction(IDB_STORE, 'readonly');
-      const get = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      const get = tx.objectStore(IDB_STORE).get(key);
       get.onsuccess = () => resolve(get.result ?? null);
       get.onerror = () => reject(get.error);
     };
@@ -105,16 +106,20 @@ export async function initWasmWallet(
 
   const server = { uri: nodeUrl, rejectUnauthorized: false };
 
-  // Try to restore from cached wallet data for faster sync
-  const cached = await idbLoad();
+  // Try to restore from cached wallet data (keys + blockchain cache) for faster sync
+  const [cachedKeys, cachedCache] = await Promise.all([
+    idbLoad(IDB_KEY_KEYS),
+    idbLoad(IDB_KEY_CACHE),
+  ]);
 
   let wallet: unknown;
-  if (cached) {
+  if (cachedKeys) {
     try {
       wallet = await moneroTs.openWalletFull({
         networkType: moneroTs.MoneroNetworkType.MAINNET,
         password: '',
-        keysData: cached,
+        keysData: cachedKeys,
+        cacheData: cachedCache ?? undefined,
         server,
       });
     } catch {
@@ -161,12 +166,19 @@ export async function syncWasmWallet(): Promise<void> {
   if (!_wallet) throw new Error('WASM wallet not initialised');
   const w = _wallet as {
     sync: () => Promise<void>;
-    getData: () => Promise<Uint8Array>;
+    getKeysData: () => Promise<Uint8Array>;
+    getCacheData: () => Promise<Uint8Array>;
   };
   await w.sync();
   try {
-    const data = await w.getData();
-    await idbSave(data);
+    const [keysData, cacheData] = await Promise.all([
+      w.getKeysData(),
+      w.getCacheData(),
+    ]);
+    await Promise.all([
+      idbSave(IDB_KEY_KEYS, keysData),
+      idbSave(IDB_KEY_CACHE, cacheData),
+    ]);
   } catch {
     // Non-fatal — cache write failure just means slower next sync
   }

@@ -1,15 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Monero-orange rounded square -->
-  <rect width="64" height="64" rx="14" fill="#ff6600"/>
+  <defs>
+    <clipPath id="c"><circle cx="32" cy="32" r="32"/></clipPath>
+  </defs>
 
-  <!--
-    Monero-style N mark — three white shapes:
-      Left arm  : rect  x=4–16,  y=6–58  (vertical, full height)
-      Diagonal  : parallelogram (16,6)→(28,6)→(48,58)→(36,58)
-                  12 px wide, sweeps top-left to bottom-right
-      Right arm : rect  x=48–60, y=6–58  (vertical, full height)
-  -->
-  <rect    x="4"  y="6" width="12" height="52" fill="white"/>
-  <polygon points="16,6 28,6 48,58 36,58"       fill="white"/>
-  <rect    x="48" y="6" width="12" height="52" fill="white"/>
+  <!-- Thin white border so logo stands out on white backgrounds -->
+  <circle cx="32" cy="32" r="31" fill="none" stroke="white" stroke-width="2"/>
+
+  <!-- Monero-orange circle background -->
+  <circle cx="32" cy="32" r="31" fill="#ff6600"/>
+
+  <g clip-path="url(#c)">
+    <!-- Grey region: right & bottom of the N -->
+    <polygon points="22,10 52,54 52,10 64,10 64,64 0,64 0,46 22,46" fill="#2d2d2d"/>
+
+    <!-- White N (10px strokes) -->
+    <rect    x="12" y="10" width="10" height="44" fill="white"/>
+    <polygon points="12,10 22,10 52,54 42,54"     fill="white"/>
+    <rect    x="42" y="10" width="10" height="44" fill="white"/>
+    <!-- Left cap: extends to circle edge (clip-path trims cleanly) -->
+    <rect    x="0"  y="46" width="22" height="8"  fill="white"/>
+    <!-- Right cap: extends to circle edge (clip-path trims cleanly) -->
+    <rect    x="42" y="10" width="22" height="8"  fill="white"/>
+  </g>
 </svg>

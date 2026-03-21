@@ -536,10 +536,11 @@ export async function startBot(
   xmrAddress: string,
   viewKey: string,
   xmrBalance: number,
+  currency?: HedgeCurrency,
 ): Promise<{ started: boolean; targetXmr: number }> {
   const res = await proxyFetch<{ started: boolean; target_xmr: number }>('/bot/start', {
     method: 'POST',
-    body: JSON.stringify({ xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance }),
+    body: JSON.stringify({ xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance, currency: currency ?? 'USD' }),
   });
   return { started: res.started, targetXmr: res.target_xmr };
 }
@@ -645,7 +646,7 @@ export async function getBotStatus(): Promise<BotStatus> {
  * More reliable on Android than a direct Ankr RPC call from the WebView.
  */
 export async function fetchEthUsdcBalanceProxy(address: string): Promise<number> {
-  const url = `${getProxyBase()}/eth/usdc-balance?eth_address=${encodeURIComponent(address)}`;
+  const url = `${getLighterProxyBase()}/eth/usdc-balance?eth_address=${encodeURIComponent(address)}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`eth/usdc-balance ${res.status}`);
   const data = await res.json() as { balance_usdc: number };

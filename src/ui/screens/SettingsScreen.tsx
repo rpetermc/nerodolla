@@ -7,7 +7,7 @@ import { initWalletConnect, pair, disconnectSession } from '../../backend/wallet
 const DEFAULT_LWS_URL = '/lws';
 
 const LWS_OPTIONS = [
-  { label: 'Nerodolla Server', value: DEFAULT_LWS_URL },
+  { label: 'NeroHedge Server', value: DEFAULT_LWS_URL },
   { label: 'Custom…', value: 'custom' },
 ];
 

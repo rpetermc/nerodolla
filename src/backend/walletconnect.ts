@@ -45,9 +45,9 @@ export async function initWalletConnect(projectId: string): Promise<void> {
     _wallet = await Web3Wallet.init({
       core,
       metadata: {
-        name: 'Nerodolla',
-        description: 'XMR wallet with delta-neutral USD hedge',
-        url: 'https://nerodolla.app',
+        name: 'NeroHedge',
+        description: 'XMR wallet with delta-neutral hedge',
+        url: 'https://nerohedge.app',
         icons: [],
       },
     });
