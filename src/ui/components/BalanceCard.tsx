@@ -32,6 +32,12 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
     ? xmrUsdValue + lighterNetEquity
     : xmrUsdValue;
 
+  const isEurHedge = hedgeStatus?.hedgeCurrency === 'EUR';
+  const eurMarkPrice = hedgeStatus?.eurPosition?.markPrice ?? 0;
+  const totalEurValue = totalUsdValue !== null && eurMarkPrice > 0
+    ? totalUsdValue / eurMarkPrice
+    : null;
+
   const hasLocked  = xmrInfo && xmrInfo.lockedFunds > 0n;
   const hasPending = xmrInfo && xmrInfo.pendingBalance > 0n;
   const allSpendable = xmrInfo &&
@@ -45,7 +51,9 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
     <div className="balance-card">
       <div className="balance-card__header">
         <span className="balance-card__label">
-          {isHedged ? 'Total Wallet Value' : 'XMR Balance'}
+          {isHedged
+            ? `Total Value (${isEurHedge ? 'EUR' : 'USD'})`
+            : 'XMR Balance'}
         </span>
         <button
           className="balance-card__refresh"
@@ -59,10 +67,12 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
 
       {isHedged ? (
         <>
-          {/* Hedged: prominent total USD value */}
+          {/* Hedged: prominent total value in hedge currency */}
           <div className="balance-card__amount">
             <span className="balance-card__xmr">
-              {totalUsdValue !== null ? `$${totalUsdValue.toFixed(2)}` : '—'}
+              {isEurHedge
+                ? (totalEurValue !== null ? `€${totalEurValue.toFixed(2)}` : '—')
+                : (totalUsdValue !== null ? `$${totalUsdValue.toFixed(2)}` : '—')}
             </span>
           </div>
 

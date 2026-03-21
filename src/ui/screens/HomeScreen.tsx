@@ -177,7 +177,9 @@ export function HomeScreen() {
             <div className="hedge-status-bar__left">
               <span className="hedge-status-bar__icon">&#x1F512;</span>
               <div>
-                <div className="hedge-status-bar__title">USD Value Locked</div>
+                <div className="hedge-status-bar__title">
+                  {hedgeStatus?.hedgeCurrency === 'EUR' ? 'EUR' : 'USD'} Value Locked
+                </div>
                 {hedgeStatus?.position && (
                   <div className="hedge-status-bar__detail">
                     {hedgeStatus.position.size.toFixed(4)} XMR short

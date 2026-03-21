@@ -9,36 +9,29 @@ Usage:
   uvicorn lighter_proxy_fix:app --host 0.0.0.0 --port 8000
 """
 
-import importlib.util
+import importlib
 import logging
 import math
-import sys
 import time
 
-# Load lighter_proxy from .pyc (no .py source file exists)
-_spec = importlib.util.spec_from_file_location(
-    'lighter_proxy',
-    '__pycache__/lighter_proxy.cpython-310.pyc',
-    submodule_search_locations=[],
-)
-lighter_proxy = importlib.util.module_from_spec(_spec)
-sys.modules['lighter_proxy'] = lighter_proxy
-_spec.loader.exec_module(lighter_proxy)
-
-# Fix WALLET_DIR: .pyc loads from __pycache__/ so Path(__file__).parent
-# resolves to __pycache__/ instead of the project root.
-import os
-lighter_proxy.WALLET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wallets')
+import lighter_proxy
 
 from fastapi import Depends, HTTPException
 
 log = logging.getLogger('lighter_proxy')
 
 # ── Bot config override ───────────────────────────────────────────────────────
-# Lower skew_factor to prevent ask spread from collapsing below post-only
-# viability when inventory skew is maxed out (original 0.8 can push ask spread
-# to <1 bps, causing post-only rejections and runaway LONG accumulation).
-lighter_proxy._BOT_CFG['skew_factor'] = 0.4
+# The bot is a market maker placing BOTH bids and asks, but for hedging we need
+# it to build a SHORT. Crank skew so asks are tight+large, bids are wide+tiny.
+#
+# With skew maxed (skew_norm=1.0) and base_spread=20bps:
+#   price_skew = 1.0 * 0.45 * 0.002 = 0.0009
+#   ask_spread = 0.002 - 0.0009 = 11 bps  (tight, fills fast)
+#   bid_spread = 0.002 + 0.0009 = 29 bps  (wide, rarely fills)
+#   ask_size = base * 1.9  (large)
+#   bid_size = base * 0.1  (tiny)
+lighter_proxy._BOT_CFG['skew_factor'] = 0.45
+lighter_proxy._BOT_CFG['size_skew_factor'] = 0.9
 
 # ── Market registry ────────────────────────────────────────────────────────────
 
@@ -76,6 +69,141 @@ lighter_proxy._ensure_wallet = _patched_ensure_wallet
 # ── Patch 2: generic /market/{symbol} endpoint ────────────────────────────────
 
 app = lighter_proxy.app
+
+
+def _swap_route_endpoint(path: str, new_endpoint):
+    """Replace a route in-place (same position) so it stays ahead of the static mount."""
+    from fastapi.routing import APIRoute
+    for i, route in enumerate(app.routes):
+        if hasattr(route, 'path') and route.path == path and isinstance(route, APIRoute):
+            # Build a fresh APIRoute with the new endpoint, preserving HTTP methods
+            new_route = APIRoute(
+                path=route.path,
+                endpoint=new_endpoint,
+                methods=route.methods,
+                name=route.name,
+            )
+            app.routes[i] = new_route
+            return True
+    return False
+
+
+# ── Patch: /account endpoint — fallback to index-based lookup ─────────────────
+# The compiled get_account uses accounts_by_l1_address which can return empty
+# (CloudFront 403, API changes, etc.). We override the endpoint to fall back
+# to our SQLite DB account_index → account(by='index') lookup.
+
+_original_get_account = None
+for route in app.routes:
+    if hasattr(route, 'path') and route.path == '/account':
+        _original_get_account = route.endpoint
+        break
+
+if _original_get_account:
+    async def patched_get_account(eth_address: str = None):
+        """Account lookup — always use index-based query for reliable position data."""
+        if not eth_address:
+            return {'address': '', 'usdcBalance': 0.0, 'totalCollateral': 0.0, 'positions': []}
+
+        # Resolve account_index: try original l1_address lookup for the index,
+        # then fall back to our DB.
+        account_index = None
+        try:
+            from lighter import AccountApi as _AA
+            lookup = await lighter_proxy._account_api.accounts_by_l1_address(
+                l1_address=eth_address
+            )
+            subs = getattr(lookup, 'sub_accounts', []) or getattr(lookup, 'accounts', []) or []
+            if subs:
+                account_index = int(getattr(subs[0], 'index', 0))
+        except Exception:
+            pass
+
+        if not account_index:
+            account_index = await lighter_proxy._db_get_account_index(eth_address.lower())
+            log.info('patched_get_account: DB fallback index=%s for %s', account_index, eth_address)
+        if not account_index:
+            return {'address': eth_address, 'usdcBalance': 0.0, 'totalCollateral': 0.0, 'positions': []}
+
+        try:
+            from lighter import ApiClient, AccountApi, Configuration
+            config = Configuration(host=lighter_proxy.LIGHTER_URL)
+            api_client = ApiClient(configuration=config)
+            acct_api = AccountApi(api_client)
+
+            ar = await acct_api.account(
+                by='index', value=str(account_index)
+            )
+            al = getattr(ar, 'accounts', []) or []
+            log.info('patched_get_account: got %d accounts from index lookup', len(al))
+            if not al:
+                return {'address': eth_address, 'usdcBalance': 0.0, 'totalCollateral': 0.0, 'positions': []}
+
+            acct = al[0]
+            collateral = float(getattr(acct, 'collateral', 0) or 0)
+            avail = float(getattr(acct, 'available_balance', collateral) or collateral)
+
+            # Parse positions ourselves to fix sign→side mapping
+            positions = []
+            for p in getattr(acct, 'positions', []) or []:
+                size = abs(float(getattr(p, 'position', 0) or 0))
+                if size == 0:
+                    continue
+                sign = int(getattr(p, 'sign', 0) or 0)
+                is_short = sign < 0
+                entry_price = float(getattr(p, 'avg_entry_price', 0) or 0)
+                raw_sym = getattr(p, 'symbol', 'UNKNOWN') or 'UNKNOWN'
+                # Normalise symbol names
+                sym_map = {'XMR': 'XMR-USD', 'EURUSD': 'EUR-USD', 'GBPUSD': 'GBP-USD'}
+                symbol = sym_map.get(raw_sym, raw_sym)
+
+                pos_dict = {
+                    'symbol': symbol,
+                    'side': 'SHORT' if is_short else 'LONG',
+                    'size': size,
+                    'entryPrice': entry_price,
+                    'markPrice': 0.0,
+                    'unrealizedPnl': float(getattr(p, 'unrealized_pnl', 0) or 0),
+                    'marginUsed': float(getattr(p, 'allocated_margin', 0) or 0),
+                    'fundingRate': 0.0,
+                    'annualizedFundingPct': 0.0,
+                    'lockedUsdValue': size * entry_price,
+                }
+
+                # Enrich with live market data
+                if symbol == 'XMR-USD':
+                    try:
+                        mi = await lighter_proxy._get_market_info_inner()
+                        pos_dict['markPrice'] = mi.get('markPrice', 0)
+                        pos_dict['fundingRate'] = mi.get('fundingRate8h', mi.get('fundingRate', 0))
+                        pos_dict['annualizedFundingPct'] = mi.get('annualizedFundingPct', 0)
+                    except Exception:
+                        pass
+                else:
+                    clean_sym = symbol.replace('-', '')
+                    if clean_sym in MARKET_REGISTRY:
+                        try:
+                            mi = await _get_market_info(MARKET_REGISTRY[clean_sym]['id'], symbol)
+                            pos_dict['markPrice'] = mi.get('markPrice', 0)
+                            pos_dict['fundingRate'] = mi.get('fundingRate8h', mi.get('fundingRate', 0))
+                            pos_dict['annualizedFundingPct'] = mi.get('annualizedFundingPct', 0)
+                        except Exception:
+                            pass
+
+                positions.append(pos_dict)
+
+            return {
+                'address': eth_address,
+                'usdcBalance': avail,
+                'totalCollateral': collateral,
+                'positions': positions,
+            }
+        except Exception as exc:
+            import traceback
+            log.warning('patched_get_account: index fallback failed: %s\n%s', exc, traceback.format_exc())
+            return {'address': eth_address, 'usdcBalance': 0.0, 'totalCollateral': 0.0, 'positions': []}
+
+    _swap_route_endpoint('/account', patched_get_account)
 
 
 async def _get_market_info(market_id: int, symbol: str) -> dict:
@@ -220,7 +348,7 @@ async def _close_eur_leg(session):
     await client.close()
 
     positions = lighter_proxy._parse_positions(result)
-    eur_longs = [p for p in positions if p.get('symbol') == 'EURUSD' and p.get('side') == 'LONG']
+    eur_longs = [p for p in positions if p.get('symbol') in ('EURUSD', 'EUR-USD') and p.get('side') == 'LONG']
 
     if not eur_longs:
         log.info('close_eur_leg: no EUR-USD LONG position found, skipping')
@@ -265,42 +393,24 @@ async def _close_eur_leg(session):
 
 
 if _original_open_hedge:
-    async def patched_open_hedge(req, session=Depends(lighter_proxy.get_session)):
+    async def _patched_open_hedge(req, session=Depends(lighter_proxy.get_session)):
         """Open XMR short + optional EUR-USD LONG."""
-        # Call the original open_hedge (XMR short only)
         result = await _original_open_hedge(req, session)
 
-        # If currency is EUR, also open a EUR-USD LONG
         currency = getattr(req, 'currency', None) or 'USD'
         if currency == 'EUR' and getattr(result, 'success', False):
             try:
                 xmr_size = float(req.xmr_size or 0)
-                # Get XMR mark price for notional calculation
                 xmr_market = await lighter_proxy._get_market_info_inner()
                 xmr_price = xmr_market.get('markPrice', 0)
                 notional_usd = xmr_size * xmr_price
                 await _open_eur_leg(session, notional_usd, req.slippage_bps or 50)
             except Exception as exc:
                 log.error('EUR leg failed (XMR short already open): %s', exc)
-                # Don't fail the whole hedge — XMR short is already placed
 
         return result
 
-    # Replace the route endpoint
-    for route in app.routes:
-        if hasattr(route, 'path') and route.path == '/hedge/open':
-            route.endpoint = patched_open_hedge
-            # Also need to update the dependant
-            route.dependant = None  # Force FastAPI to rebuild
-            break
-
-    # Re-register as a clean route since manipulating internals is fragile
-    # Remove old route and add new one
-    app.routes[:] = [r for r in app.routes if not (hasattr(r, 'path') and r.path == '/hedge/open')]
-
-    @app.post('/hedge/open')
-    async def open_hedge(req: lighter_proxy.OpenHedgeRequest, session=Depends(lighter_proxy.get_session)):
-        return await patched_open_hedge(req, session)
+    _swap_route_endpoint('/hedge/open', _patched_open_hedge)
 
 
 # ── Patch 4: close EUR leg before closing XMR short ───────────────────────────
@@ -312,65 +422,18 @@ for route in app.routes:
         break
 
 if _original_close_hedge:
-    app.routes[:] = [r for r in app.routes if not (hasattr(r, 'path') and r.path == '/hedge/close')]
-
-    @app.post('/hedge/close')
-    async def close_hedge(session=Depends(lighter_proxy.get_session)):
+    async def _patched_close_hedge(session=Depends(lighter_proxy.get_session)):
         """Close EUR-USD LONG (if any) then close XMR short and withdraw."""
         try:
             await _close_eur_leg(session)
         except Exception as exc:
             log.error('close_eur_leg failed (continuing with XMR close): %s', exc)
-
         return await _original_close_hedge(session)
 
-
-# ── Patch 5: extend _parse_positions to handle EUR-USD ────────────────────────
-
-_original_parse_positions = lighter_proxy._parse_positions
-
-# Map Lighter symbols to our normalised names
-_SYMBOL_MAP = {
-    'XMR': 'XMR-USD',
-    'EURUSD': 'EUR-USD',
-    'GBPUSD': 'GBP-USD',
-    'XAU': 'XAU-USD',
-    'XAG': 'XAG-USD',
-}
+    _swap_route_endpoint('/hedge/close', _patched_close_hedge)
 
 
-def _patched_parse_positions(accounts_data):
-    """Parse positions, recognising EUR-USD and other FX/commodity pairs."""
-    positions = []
-    try:
-        for acct in accounts_data.accounts:
-            for pos in getattr(acct, 'positions', []) or []:
-                try:
-                    is_short = float(getattr(pos, 'position', 0) or 0) < 0
-                    entry_price = float(getattr(pos, 'avg_entry_price', 0) or 0)
-                    size = abs(float(getattr(pos, 'position', 0) or 0))
-                    raw_sym = str(getattr(pos, 'symbol', 'UNKNOWN') or 'UNKNOWN')
-                    symbol = _SYMBOL_MAP.get(raw_sym, raw_sym)
-                    side = 'SHORT' if is_short else 'LONG'
-                    positions.append({
-                        'symbol': symbol,
-                        'side': side,
-                        'size': size,
-                        'entryPrice': entry_price,
-                        'unrealizedPnl': float(getattr(pos, 'unrealized_pnl', 0) or 0),
-                        'margin': float(getattr(pos, 'allocated_margin', 0) or 0),
-                    })
-                except Exception as exc:
-                    log.warning('_parse_positions error: %s', exc)
-    except Exception as exc:
-        log.warning('_parse_positions outer error: %s', exc)
-    return positions
-
-
-lighter_proxy._parse_positions = _patched_parse_positions
-
-
-# ── Patch 6: add 'currency' field to OpenHedgeRequest ─────────────────────────
+# ── Patch 5: add 'currency' field to OpenHedgeRequest ─────────────────────────
 # The original model doesn't have it; pydantic ignores extra fields by default.
 # We need to add it so the patched open_hedge can read req.currency.
 
@@ -404,12 +467,8 @@ for route in app.routes:
         break
 
 if _original_bot_start:
-    app.routes[:] = [r for r in app.routes if not (hasattr(r, 'path') and r.path == '/bot/start')]
-
-    @app.post('/bot/start')
-    async def bot_start(req: PatchedBotStartRequest, session=Depends(lighter_proxy.get_session)):
+    async def _patched_bot_start(req: PatchedBotStartRequest, session=Depends(lighter_proxy.get_session)):
         """Start bot + open EUR-USD LONG if currency is EUR."""
-        # Forward to original with the original request model
         original_req = lighter_proxy.BotStartRequest(
             xmr_address=req.xmr_address,
             view_key=req.view_key,
@@ -429,3 +488,5 @@ if _original_bot_start:
                 log.error('EUR leg failed on bot start (bot already running): %s', exc)
 
         return result
+
+    _swap_route_endpoint('/bot/start', _patched_bot_start)
