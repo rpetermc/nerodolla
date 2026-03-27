@@ -33,6 +33,8 @@ website/*.apk
 
 # Server-side — not for public repo
 lighter_proxy.py
+lighter_proxy_dev.py
+lighter_proxy_fix.py
 requirements-proxy.txt
 monero-wallet-rpc-wrapper.sh
 monero-wallet-rpc-recheck.sh

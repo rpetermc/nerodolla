@@ -15,9 +15,15 @@ import {
 } from '../../backend/walletconnect';
 
 export function WalletConnectModal() {
-  const { wcPendingProposal, wcPendingRequest } = useWalletStore();
+  const { wcPendingProposal, wcPendingRequest, activeWalletId } = useWalletStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Check if bot is running on the active wallet
+  const botActiveKey = activeWalletId
+    ? `nerodolla_bot_active_${activeWalletId}`
+    : 'nerodolla_bot_active';
+  const isBotRunning = localStorage.getItem(botActiveKey) === 'true';
 
   async function handleAction(action: () => Promise<void>) {
     setBusy(true);
@@ -36,6 +42,7 @@ export function WalletConnectModal() {
       proposal={wcPendingProposal}
       busy={busy}
       error={error}
+      isBotRunning={isBotRunning}
       onApprove={() => handleAction(() => approveSession(wcPendingProposal))}
       onReject={() => handleAction(() => rejectSession(wcPendingProposal))}
     />;
@@ -60,11 +67,12 @@ type ProposalProps = {
   proposal: WcProposalEvent;
   busy: boolean;
   error: string | null;
+  isBotRunning: boolean;
   onApprove: () => void;
   onReject: () => void;
 };
 
-function SessionProposalOverlay({ proposal, busy, error, onApprove, onReject }: ProposalProps) {
+function SessionProposalOverlay({ proposal, busy, error, isBotRunning, onApprove, onReject }: ProposalProps) {
   const meta = proposal.params.proposer.metadata;
   const reqNamespaces = proposal.params.requiredNamespaces;
 
@@ -98,6 +106,13 @@ function SessionProposalOverlay({ proposal, busy, error, onApprove, onReject }: 
           </div>
         )}
 
+        {isBotRunning && (
+          <div className="wc-modal__bot-warning">
+            Bot is running on this wallet. Connecting a DApp may cause nonce
+            conflicts and order failures. Stop the bot first for reliable operation.
+          </div>
+        )}
+
         {error && <p className="wc-modal__error">{error}</p>}
 
         <div className="wc-modal__actions">
@@ -113,7 +128,7 @@ function SessionProposalOverlay({ proposal, busy, error, onApprove, onReject }: 
             onClick={onApprove}
             disabled={busy}
           >
-            {busy ? 'Connecting…' : 'Connect'}
+            {busy ? 'Connecting…' : isBotRunning ? 'Connect Anyway' : 'Connect'}
           </button>
         </div>
       </div>

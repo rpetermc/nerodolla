@@ -7,7 +7,7 @@
  *        → opening → live | error
  */
 import { useState, useRef, useEffect } from 'react';
-import { useWalletStore, useSettingsStore } from '../../store/wallet';
+import { useWalletStore } from '../../store/wallet';
 import { getDepositIntentAddress } from '../../backend/deposit';
 import {
   getQuote,
@@ -27,7 +27,7 @@ import {
   getDepositStatus,
   reRegisterZkKey,
   startBot,
-  getEurMarketInfo,
+  getMarketInfo,
 } from '../../backend/lighter';
 import type { LighterSigningData, HedgeCurrency } from '../../backend/lighter';
 import { signMessage } from '../../wallet/eth';
@@ -42,30 +42,34 @@ interface PersistedHedgeState {
   savedAt: number;
 }
 
-const HEDGE_PERSIST_KEY = 'nerodolla_pending_hedge';
+const HEDGE_PERSIST_PREFIX = 'nerodolla_pending_hedge';
 const HEDGE_PERSIST_TTL = 2 * 60 * 60 * 1000; // 2h — wagyu order lifetime
 
-function saveHedgeState(state: Omit<PersistedHedgeState, 'savedAt'>) {
+function hedgeKey(walletId?: string | null): string {
+  return walletId ? `${HEDGE_PERSIST_PREFIX}_${walletId}` : HEDGE_PERSIST_PREFIX;
+}
+
+function saveHedgeState(state: Omit<PersistedHedgeState, 'savedAt'>, walletId?: string | null) {
   try {
-    localStorage.setItem(HEDGE_PERSIST_KEY, JSON.stringify({ ...state, savedAt: Date.now() }));
+    localStorage.setItem(hedgeKey(walletId), JSON.stringify({ ...state, savedAt: Date.now() }));
   } catch { /* ignore */ }
 }
 
-function loadHedgeState(): PersistedHedgeState | null {
+function loadHedgeState(walletId?: string | null): PersistedHedgeState | null {
   try {
-    const raw = localStorage.getItem(HEDGE_PERSIST_KEY);
+    const raw = localStorage.getItem(hedgeKey(walletId));
     if (!raw) return null;
     const data = JSON.parse(raw) as PersistedHedgeState;
     if (Date.now() - data.savedAt > HEDGE_PERSIST_TTL) {
-      localStorage.removeItem(HEDGE_PERSIST_KEY);
+      localStorage.removeItem(hedgeKey(walletId));
       return null;
     }
     return data;
   } catch { return null; }
 }
 
-function clearHedgeState() {
-  try { localStorage.removeItem(HEDGE_PERSIST_KEY); } catch { /* ignore */ }
+function clearHedgeState(walletId?: string | null) {
+  try { localStorage.removeItem(hedgeKey(walletId)); } catch { /* ignore */ }
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -85,6 +89,13 @@ interface HedgeOrchestratorProps {
 // We target 13% to leave a meaningful buffer above the maintenance margin.
 const LIGHTER_INITIAL_MARGIN_RATE = 0.13;
 
+const CURRENCY_LABELS: Record<string, string> = {
+  USD: '$ USD', EUR: '€ EUR', GBP: '£ GBP', XAU: 'Au GOLD', XAG: 'Ag SILVER',
+};
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$', EUR: '€', GBP: '£', XAU: 'oz', XAG: 'oz',
+};
+
 /**
  * Given available USDC and current mark price, return the largest XMR short
  * that can be safely opened without immediately hitting a margin warning.
@@ -96,8 +107,12 @@ function maxHedgeableXmr(usdcAvailable: number, markPrice: number): number {
 }
 
 export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestratorProps) {
-  const { xmrKeys, ethWallet, xmrInfo, walletCreatedHeight, setSessionToken, lighterMarket } = useWalletStore();
-  const { hedgeCurrency: currencyPref, updateSettings } = useSettingsStore();
+  const { xmrKeys, ethWallet, xmrInfo, walletCreatedHeight, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
+  // Per-wallet currency preference (stored in localStorage, not the global settings store)
+  const walletCurrencyKey = activeWalletId ? `nerodolla_hedge_currency_${activeWalletId}` : null;
+  const savedCurrency = walletCurrencyKey
+    ? (localStorage.getItem(walletCurrencyKey) as HedgeCurrency | null)
+    : null;
 
   const [step, setStep]                   = useState<OrchestratorStep>('idle');
   const [pct, setPct]                     = useState(20);   // % of spendable balance
@@ -112,25 +127,34 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const [isResumed, setIsResumed]         = useState(false); // true when restored from localStorage
   const [mode, setMode]                   = useState<'simple' | 'bot'>('simple');
   const [pendingRecoveryStep, setPendingRecoveryStep] = useState<'usdc_ready' | 'deposit_pending' | null>(null);
-  const [currency, setCurrencyState]      = useState<HedgeCurrency>(currencyPref ?? 'USD');
-  const [eurRate, setEurRate]             = useState<number | null>(null); // EUR/USD mark price
+  const [currency, setCurrencyState]      = useState<HedgeCurrency>(savedCurrency ?? 'USD');
+  const [currencyRate, setCurrencyRate]   = useState<number | null>(null); // currency/USD mark price
+
+  // Currency-aware collateral defaults
+  const CURRENCY_DEFAULTS: Record<HedgeCurrency, number> = {
+    USD: 20, EUR: 30, GBP: 30, XAU: 35, XAG: 40,
+  };
 
   function setCurrency(c: HedgeCurrency) {
     setCurrencyState(c);
     currencyRef.current = c;
-    updateSettings({ hedgeCurrency: c });
-    setQuote(null); // Clear stale quote from previous currency
-    // Re-fetch quote for current XMR amount
-    const xmr = maxXmr > 0 ? Math.floor(maxXmr * pct / 100 * 1e6) / 1e6 : 0;
+    if (walletCurrencyKey) localStorage.setItem(walletCurrencyKey, c);
+    setQuote(null);
+    // Apply currency-aware default collateral %
+    const newPct = CURRENCY_DEFAULTS[c];
+    setPct(newPct);
+    const xmr = maxXmr > 0 ? Math.floor(maxXmr * newPct / 100 * 1e6) / 1e6 : 0;
     if (xmr >= parseFloat(MIN_SWAP_XMR)) fetchQuote(xmr.toFixed(6));
-    // Fetch EUR rate lazily when user first selects EUR
-    if (c === 'EUR' && eurRate === null) {
-      getEurMarketInfo()
-        .then(m => setEurRate(m.markPrice))
+    // Fetch currency rate for non-USD
+    if (c !== 'USD') {
+      setCurrencyRate(null);
+      getMarketInfo(`${c}-USD`)
+        .then(m => setCurrencyRate(m.markPrice))
         .catch(() => {
-          setErrorMsg('Could not fetch EUR/USD rate — switching back to USD.');
+          setErrorMsg(`Could not fetch ${c}/USD rate — switching back to USD.`);
           setCurrencyState('USD');
           currencyRef.current = 'USD';
+          setPct(CURRENCY_DEFAULTS.USD);
         });
     }
   }
@@ -148,7 +172,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   // Resume in-flight bridge if the app was locked mid-flow, or auto-check when
   // we already know USDC is waiting in Lighter (preCheck prop).
   useEffect(() => {
-    const saved = loadHedgeState();
+    const saved = loadHedgeState(activeWalletId);
     if (saved) {
       wagyuOrderRef.current = saved.wagyuOrder;
       isNewAccountRef.current = saved.isNewAccount;
@@ -163,7 +187,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       if (pollRef.current) clearInterval(pollRef.current);
       if (quoteTimerRef.current) clearTimeout(quoteTimerRef.current);
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeWalletId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Floor to 6 d.p. so computed amounts never exceed spendable balance (toFixed rounds up)
   const maxXmr = xmrInfo ? Math.floor(Number(xmrInfo.spendableBalance) / 1e6) / 1e6 : 0;
@@ -298,8 +322,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     if (!xmrKeys) return;
     try {
       await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, currencyRef.current);
-      localStorage.setItem('nerodolla_bot_active', 'true');
-      clearHedgeState();
+      const botKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
+      localStorage.setItem(botKey, 'true');
+      clearHedgeState(activeWalletId);
       setStep('live');
       onHedgeOpened();
     } catch (err) {
@@ -420,7 +445,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       }
 
       setStep('bridging');
-      saveHedgeState({ wagyuOrder: order, isNewAccount: isNewAccountRef.current });
+      saveHedgeState({ wagyuOrder: order, isNewAccount: isNewAccountRef.current }, activeWalletId);
       startBridgePolling(order.orderId, order);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Transaction failed');
@@ -441,14 +466,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         if (detail.status === 'complete') {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
-          clearHedgeState();
+          clearHedgeState(activeWalletId);
           // USDC should now be in Lighter — run account check which handles
           // session readiness and transitions to mode_select.
           runCheck();
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
-          clearHedgeState();
+          clearHedgeState(activeWalletId);
           setErrorMsg(`Bridge ${detail.status}${detail.errorMessage ? `: ${detail.errorMessage}` : ''}. Your XMR balance was not affected.`);
           setStep('error');
         }
@@ -458,7 +483,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         if (msg.includes('404')) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
-          clearHedgeState();
+          clearHedgeState(activeWalletId);
           setErrorMsg('Previous bridge order not found. Your XMR balance was not affected.');
           setStep('error');
         }
@@ -590,7 +615,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         const account = await getLighterAccount(ethWallet!.address);
         const hasShort = account.positions.some(p => p.symbol === 'XMR-USD' && p.side === 'SHORT');
         if (hasShort) {
-          clearHedgeState();
+          clearHedgeState(activeWalletId);
           setStep('live');
           onHedgeOpened();
           return;
@@ -599,7 +624,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     }
     // Timed out — still call onHedgeOpened so the parent can refresh; it should
     // appear shortly and the home screen sync will pick it up.
-    clearHedgeState();
+    clearHedgeState(activeWalletId);
     setStep('live');
     onHedgeOpened();
   }
@@ -803,25 +828,29 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   }
 
   if (step === 'slider') {
-    const eurLockValue = currency === 'EUR' && eurRate && quote
-      ? (Number(quote.minReceived) / eurRate).toFixed(2)
+    const currencyLockValue = currency !== 'USD' && currencyRate && quote
+      ? (Number(quote.minReceived) / currencyRate).toFixed(2)
       : null;
+    const warnThreshold = currency === 'USD' ? 15 : 20;
     return (
       <div className="hedge-orch">
-        <div className="hedge-orch__currency-toggle">
-          <button
-            className={`hedge-orch__currency-btn${currency === 'USD' ? ' hedge-orch__currency-btn--active' : ''}`}
-            onClick={() => setCurrency('USD')}
-          >
-            $ USD
-          </button>
-          <button
-            className={`hedge-orch__currency-btn${currency === 'EUR' ? ' hedge-orch__currency-btn--active' : ''}`}
-            onClick={() => setCurrency('EUR')}
-          >
-            € EUR
-          </button>
+        <div className="hedge-orch__currency-grid">
+          {(Object.keys(CURRENCY_LABELS) as HedgeCurrency[]).map(c => (
+            <button
+              key={c}
+              className={`hedge-orch__currency-btn${currency === c ? ' hedge-orch__currency-btn--active' : ''}`}
+              onClick={() => setCurrency(c)}
+            >
+              {CURRENCY_LABELS[c]}
+            </button>
+          ))}
         </div>
+        {pct < warnThreshold && (
+          <div className="hedge-orch__collateral-warn">
+            Low collateral ({pct}%) — risk of liquidation
+            {currency !== 'USD' ? '. Multi-position hedges need more margin.' : '.'}
+          </div>
+        )}
         <div className="hedge-orch__slider-row">
           <input
             className="hedge-orch__slider"
@@ -848,7 +877,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             {xmrFromPct.toFixed(4)} XMR
             {quote
               ? <> → <strong>{quote.minReceived} USDC</strong> min
-                  {eurLockValue && <> ≈ <strong>€{eurLockValue}</strong> locked</>}
+                  {currencyLockValue && <> ≈ <strong>{CURRENCY_SYMBOLS[currency]}{currencyLockValue}</strong> locked</>}
                 </>
               : <> — fetching quote…</>}
           </div>
@@ -878,7 +907,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           </div>
           <div className="hedge-orch__review-row">
             <span>Destination</span>
-            <span>Lighter (Arbitrum)</span>
+            <span>Lighter (via Arbitrum)</span>
           </div>
           <div className="hedge-orch__review-row">
             <span>Bridge</span>
@@ -886,7 +915,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           </div>
           <div className="hedge-orch__review-row">
             <span>Lock value in</span>
-            <span>{currency === 'EUR' ? '€ EUR' : '$ USD'}</span>
+            <span>{CURRENCY_LABELS[currency] ?? currency}</span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -953,14 +982,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             <button
               className="btn btn--primary"
               style={{ fontSize: 13 }}
-              onClick={() => { clearHedgeState(); if (pollRef.current) clearInterval(pollRef.current); setIsResumed(false); setBridgeDetail(null); runCheck(); }}
+              onClick={() => { clearHedgeState(activeWalletId); if (pollRef.current) clearInterval(pollRef.current); setIsResumed(false); setBridgeDetail(null); runCheck(); }}
             >
               Check account
             </button>
             <button
               className="btn btn--ghost"
               style={{ fontSize: 13 }}
-              onClick={() => { clearHedgeState(); if (pollRef.current) clearInterval(pollRef.current); setStep('idle'); setIsResumed(false); setBridgeDetail(null); }}
+              onClick={() => { clearHedgeState(activeWalletId); if (pollRef.current) clearInterval(pollRef.current); setStep('idle'); setIsResumed(false); setBridgeDetail(null); }}
             >
               Start fresh
             </button>
@@ -970,7 +999,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           <button
             className="btn btn--ghost hedge-orch__cta"
             style={{ marginTop: 12, fontSize: 13 }}
-            onClick={() => { clearHedgeState(); if (pollRef.current) clearInterval(pollRef.current); setStep('idle'); setIsResumed(false); setBridgeDetail(null); }}
+            onClick={() => { clearHedgeState(activeWalletId); if (pollRef.current) clearInterval(pollRef.current); setStep('idle'); setIsResumed(false); setBridgeDetail(null); }}
           >
             Start fresh
           </button>
@@ -1017,9 +1046,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         <div style={{ color: 'var(--color-green)', fontWeight: 600, fontSize: 15 }}>
           {mode === 'bot'
             ? '✓ Bot started — building short position via limit orders'
-            : currency === 'EUR'
-              ? '✓ Hedge active — EUR value locked'
-              : '✓ Hedge active — USD value locked'}
+            : `✓ Hedge active — ${currency} value locked`}
         </div>
       </div>
     );
@@ -1037,7 +1064,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         ) : (
           <button
             className="btn btn--ghost hedge-orch__cta"
-            onClick={() => { clearHedgeState(); setStep('idle'); setErrorMsg(null); }}
+            onClick={() => { clearHedgeState(activeWalletId); setStep('idle'); setErrorMsg(null); }}
           >
             Try again
           </button>

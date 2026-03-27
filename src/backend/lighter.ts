@@ -37,25 +37,57 @@ export function getLighterProxyBase(): string {
 /** @deprecated use getLighterProxyBase() for dynamic resolution */
 export const LIGHTER_PROXY_BASE = '/lighter';
 
-// ── Session token ─────────────────────────────────────────────────────────────
+// ── Session token (per-wallet) ────────────────────────────────────────────────
 
-let _sessionToken: string | null = null;
-let _sessionRenewer: (() => Promise<void>) | null = null;
+const _sessionTokens = new Map<string, string>();  // walletId → token
+let _activeWalletId: string | null = null;
+const _sessionRenewers = new Map<string, () => Promise<void>>(); // walletId → renewer
 let _renewingSession = false;
 
-export function setProxySessionToken(token: string | null): void {
-  _sessionToken = token;
-  // Clear the auto-renewer when the session is revoked (e.g. on wallet lock).
-  if (!token) _sessionRenewer = null;
+/** Get the session token for the currently active wallet. */
+function getActiveSessionToken(): string | null {
+  return _activeWalletId ? _sessionTokens.get(_activeWalletId) ?? null : null;
+}
+
+/**
+ * Set the active wallet ID for session routing.
+ * Call this when switching wallets so proxyFetch uses the right session token.
+ */
+export function setActiveSessionWallet(walletId: string | null): void {
+  _activeWalletId = walletId;
+}
+
+export function setProxySessionToken(token: string | null, walletId?: string): void {
+  const id = walletId ?? _activeWalletId;
+  if (!id) return;
+  if (token) {
+    _sessionTokens.set(id, token);
+  } else {
+    _sessionTokens.delete(id);
+    _sessionRenewers.delete(id);
+  }
+}
+
+/** Clear all session tokens and renewers (called on lock). */
+export function clearAllSessions(): void {
+  _sessionTokens.clear();
+  _sessionRenewers.clear();
+  _activeWalletId = null;
 }
 
 /**
  * Register a callback that proxyFetch will invoke to transparently renew an
  * expired session on HTTP 401, then retry the original request once.
- * Pass null to deregister (called automatically by setProxySessionToken(null)).
+ * Pass null to deregister.
  */
-export function setSessionRenewer(fn: (() => Promise<void>) | null): void {
-  _sessionRenewer = fn;
+export function setSessionRenewer(fn: (() => Promise<void>) | null, walletId?: string): void {
+  const id = walletId ?? _activeWalletId;
+  if (!id) return;
+  if (fn) {
+    _sessionRenewers.set(id, fn);
+  } else {
+    _sessionRenewers.delete(id);
+  }
 }
 
 /**
@@ -63,16 +95,17 @@ export function setSessionRenewer(fn: (() => Promise<void>) | null): void {
  * Returns true if renewal succeeded, false if there is no renewer or it failed.
  */
 export async function renewSession(): Promise<boolean> {
-  if (!_sessionRenewer) return false;
+  const renewer = _activeWalletId ? _sessionRenewers.get(_activeWalletId) : null;
+  if (!renewer) return false;
   try {
-    await _sessionRenewer();
+    await renewer();
     return true;
   } catch {
     return false;
   }
 }
 
-export type HedgeCurrency = 'USD' | 'EUR';
+export type HedgeCurrency = 'USD' | 'EUR' | 'GBP' | 'XAU' | 'XAG';
 
 export interface LighterPosition {
   symbol: string;          // e.g. 'XMR-USD'
@@ -112,19 +145,23 @@ async function proxyFetch<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${getLighterProxyBase()}${path}`;
-  const makeHeaders = (): Record<string, string> => ({
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string> ?? {}),
-    ...(_sessionToken ? { 'X-Session-Token': _sessionToken } : {}),
-  });
+  const makeHeaders = (): Record<string, string> => {
+    const token = getActiveSessionToken();
+    return {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string> ?? {}),
+      ...(token ? { 'X-Session-Token': token } : {}),
+    };
+  };
 
-  let res = await fetch(url, { ...options, headers: makeHeaders() });
+  let res = await fetch(url, { ...options, headers: makeHeaders(), cache: 'no-store' });
 
   // Auto-renew expired session (HTTP 401) and retry once.
-  if (res.status === 401 && _sessionRenewer && !_renewingSession) {
+  const renewer = _activeWalletId ? _sessionRenewers.get(_activeWalletId) : null;
+  if (res.status === 401 && renewer && !_renewingSession) {
     _renewingSession = true;
     try {
-      await _sessionRenewer();
+      await renewer();
     } catch {
       // Renewal failed — fall through and throw the original 401 below.
     } finally {
@@ -149,7 +186,13 @@ export async function getLighterAccount(ethAddress?: string): Promise<LighterAcc
   const path = ethAddress
     ? `/account?eth_address=${encodeURIComponent(ethAddress)}`
     : '/account';
-  return proxyFetch<LighterAccount>(path);
+  const result = await proxyFetch<LighterAccount>(path);
+  console.log('[getLighterAccount]', ethAddress?.slice(0, 10), '→', {
+    totalCollateral: result.totalCollateral,
+    positionCount: result.positions?.length ?? 0,
+    positions: result.positions?.map(p => `${p.symbol} ${p.side}`),
+  });
+  return result;
 }
 
 /**
@@ -166,11 +209,19 @@ export async function getHedgeStatus(ethAddress?: string): Promise<HedgeStatus> 
     return { isHedged: false, lighterUsdc: account.totalCollateral };
   }
 
-  // Detect EUR hedge: a LONG EUR-USD position alongside the XMR short
-  const eurPos = account.positions.find(
-    (p) => p.symbol === 'EUR-USD' && p.side === 'LONG'
+  // Detect currency hedge: any LONG position alongside the XMR short
+  const currencyLongs = account.positions.filter(
+    (p) => p.side === 'LONG' && p.symbol !== 'XMR-USD'
   );
-  const hedgeCurrency: HedgeCurrency = eurPos ? 'EUR' : 'USD';
+  const eurPos = currencyLongs.find(p => p.symbol === 'EUR-USD');
+  // Determine hedge currency from open LONG position
+  const SYMBOL_TO_CURRENCY: Record<string, HedgeCurrency> = {
+    'EUR-USD': 'EUR', 'GBP-USD': 'GBP', 'XAU-USD': 'XAU', 'XAG-USD': 'XAG',
+  };
+  const currencyLong = currencyLongs[0];
+  const hedgeCurrency: HedgeCurrency = currencyLong
+    ? (SYMBOL_TO_CURRENCY[currencyLong.symbol] ?? 'USD')
+    : 'USD';
   const lockedEurValue = eurPos && eurPos.markPrice > 0
     ? xmrPos.lockedUsdValue / eurPos.markPrice
     : undefined;
@@ -178,7 +229,7 @@ export async function getHedgeStatus(ethAddress?: string): Promise<HedgeStatus> 
   return {
     isHedged: true,
     position: xmrPos,
-    eurPosition: eurPos,
+    eurPosition: currencyLong ?? eurPos,
     hedgeCurrency,
     lockedUsdValue: xmrPos.lockedUsdValue,
     lockedEurValue,
@@ -206,7 +257,12 @@ export interface HedgeResult {
   orderId?: string;
   filledSize?: number;
   avgPrice?: number;
+  usdcWithdrawn?: number;
   error?: string;
+  currency?: string;
+  currencyOrderId?: string;
+  currencyFilledSize?: number;
+  currencyAvgPrice?: number;
 }
 
 /**
@@ -235,6 +291,33 @@ export async function depositAndOpenHedge(
  */
 export async function closeHedgeAndWithdraw(): Promise<HedgeResult> {
   return proxyFetch<HedgeResult>('/hedge/close', { method: 'POST' });
+}
+
+/**
+ * Switch hedge currency without closing the XMR short.
+ * Closes any existing currency LONG and opens a new one if target != USD.
+ */
+export async function switchHedge(
+  toCurrency: HedgeCurrency,
+  slippageBps = 50,
+): Promise<HedgeResult> {
+  return proxyFetch<HedgeResult>('/hedge/switch', {
+    method: 'POST',
+    body: JSON.stringify({ to_currency: toCurrency, slippage_bps: slippageBps }),
+  });
+}
+
+/**
+ * Withdraw excess USDC collateral while positions are open.
+ */
+export async function withdrawExcessCollateral(
+  amount?: number,
+  marginTargetPct = 30,
+): Promise<HedgeResult> {
+  return proxyFetch<HedgeResult>('/hedge/withdraw-excess', {
+    method: 'POST',
+    body: JSON.stringify({ amount: amount ?? null, margin_target_pct: marginTargetPct }),
+  });
 }
 
 export interface RebalanceResult {
@@ -321,11 +404,18 @@ export async function getXmrMarketInfo(): Promise<LighterMarketInfo> {
 }
 
 /**
+ * Get market data for any supported symbol (EUR-USD, GBP-USD, XAU-USD, XAG-USD).
+ */
+export async function getMarketInfo(symbol: string): Promise<LighterMarketInfo> {
+  return proxyFetch<LighterMarketInfo>(`/market/${symbol}`);
+}
+
+/**
  * Get current EUR-USD market data from Lighter (via proxy).
  * Used when the user selects EUR as their hedge currency.
  */
 export async function getEurMarketInfo(): Promise<LighterMarketInfo> {
-  return proxyFetch<LighterMarketInfo>('/market/EUR-USD');
+  return getMarketInfo('EUR-USD');
 }
 
 // ── Account setup ─────────────────────────────────────────────────────────────
@@ -529,6 +619,7 @@ export interface BotStatus {
   errorMsg: string | null;
   iteration: number;
   startedAt: number;
+  initialCapitalUsd: number;
 }
 
 /** Start the market-making bot for the current session. */

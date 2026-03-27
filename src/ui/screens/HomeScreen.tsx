@@ -1,13 +1,19 @@
 import { useEffect, useCallback, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
-import { useWalletStore, useSettingsStore } from '../../store/wallet';
+import { useWalletStore, useSettingsStore, saveWalletCache, loadWalletCache } from '../../store/wallet';
 import { BalanceCard } from '../components/BalanceCard';
 import { HedgeToggle } from '../components/HedgeToggle';
 import { TxList } from '../components/TxList';
+import { WalletSwitcher } from '../components/WalletSwitcher';
 import { loginLws, getAddressInfo, getAddressTxs, createSubaddress } from '../../backend/lws';
-import { getHedgeStatus, getXmrMarketInfo, closeHedgeAndWithdraw } from '../../backend/lighter';
+import { getHedgeStatus, getXmrMarketInfo, closeHedgeAndWithdraw, setActiveSessionWallet, setProxySessionToken } from '../../backend/lighter';
 import { fetchArbUsdcBalance } from '../../backend/wagyu';
 import { initWasmWallet, syncWasmWallet, getWasmAddressInfo, getWasmTxs } from '../../backend/wasm-wallet';
+import { AddWalletFlow } from '../components/AddWalletFlow';
+import { loadKeystore, getWalletList } from '../../wallet/keystore';
+import { mnemonicToSeed, xmrSeedFromMaster, ethSeedFromMaster } from '../../wallet/seed';
+import { deriveXmrKeys } from '../../wallet/xmr';
+import { deriveEthWallet } from '../../wallet/eth';
 
 export function HomeScreen() {
   const {
@@ -18,6 +24,8 @@ export function HomeScreen() {
     hedgeStatus,
     syncProgress,
     walletCreatedHeight,
+    activeWalletId,
+    walletList,
     setSyncing,
     setSyncProgress,
     setXmrInfo,
@@ -27,10 +35,14 @@ export function HomeScreen() {
     setHedgeStatus,
     setLighterMarket,
     setHedgeLoading,
+    setKeys,
+    setActiveWalletId,
+    setWalletList,
+    setSessionToken,
     navigate,
   } = useWalletStore();
 
-  const { xmrSyncMode, remoteLwsUrl, nodeUrl, walletRestoreHeight, lighterProxyUrl } = useSettingsStore();
+  const { xmrSyncMode, remoteLwsUrl, nodeUrl, walletRestoreHeight, lighterProxyUrl, updateSettings } = useSettingsStore();
   // On Android there is no Vite proxy — use the configured proxy server directly.
   const effectiveLwsUrl = Capacitor.isNativePlatform()
     ? `${lighterProxyUrl.replace(/\/$/, '')}/lws`
@@ -38,18 +50,34 @@ export function HomeScreen() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [isClosingHedge, setIsClosingHedge] = useState(false);
+  const [showSwitcher, setShowSwitcher] = useState(false);
+  const [showAddWallet, setShowAddWallet] = useState(false);
+
+  // Find active wallet label
+  const activeWallet = walletList.find(w => w.id === activeWalletId);
+  const walletLabel = activeWallet?.label ?? 'Wallet';
+  const hasMultipleWallets = walletList.length > 1 || walletList.length === 1;
 
   const sync = useCallback(async () => {
-    if (!xmrKeys) return;
+    // Read keys and wallet ID from the store at call time (not closure) to
+    // avoid stale-closure races when switching wallets.  The closure values
+    // (xmrKeys, ethWallet) are still used as useCallback deps so the
+    // interval resets on wallet change, but the *actual* data used inside
+    // the function always comes from the store snapshot.
+    const snap = useWalletStore.getState();
+    const syncXmrKeys = snap.xmrKeys;
+    const syncEthWallet = snap.ethWallet;
+    const syncWalletId = snap.activeWalletId;
+    if (!syncXmrKeys) return;
     setSyncing(true);
     setSyncError(null);
     try {
       let info, txData;
       if (xmrSyncMode === 'wasm-node') {
         await initWasmWallet(
-          xmrKeys.primaryAddress,
-          xmrKeys.viewKeyPrivate,
-          xmrKeys.spendKeyPrivate,
+          syncXmrKeys.primaryAddress,
+          syncXmrKeys.viewKeyPrivate,
+          syncXmrKeys.spendKeyPrivate,
           walletCreatedHeight ?? walletRestoreHeight ?? 0,
           nodeUrl,
           (p) => setSyncProgress(p),
@@ -59,28 +87,49 @@ export function HomeScreen() {
         [info, txData] = await Promise.all([getWasmAddressInfo(), getWasmTxs()]);
       } else {
         const lwsCfg = { baseUrl: effectiveLwsUrl };
-        await loginLws(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate).catch(() => {});
+        await loginLws(lwsCfg, syncXmrKeys.primaryAddress, syncXmrKeys.viewKeyPrivate).catch(() => {});
         [info, txData] = await Promise.all([
-          getAddressInfo(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
-          getAddressTxs(lwsCfg, xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate),
+          getAddressInfo(lwsCfg, syncXmrKeys.primaryAddress, syncXmrKeys.viewKeyPrivate),
+          getAddressTxs(lwsCfg, syncXmrKeys.primaryAddress, syncXmrKeys.viewKeyPrivate),
         ]);
       }
 
       const [hedgeStatusResult, market] = await Promise.all([
-        getHedgeStatus(ethWallet?.address).catch(() => null),
+        getHedgeStatus(syncEthWallet?.address).catch((err) => {
+          console.warn('[sync] getHedgeStatus failed:', err?.message ?? err);
+          return null;
+        }),
         getXmrMarketInfo().catch(() => null),
       ]);
 
+      // Discard results if the user switched wallets while we were fetching
+      const currentWalletId = useWalletStore.getState().activeWalletId;
+      if (currentWalletId !== syncWalletId) {
+        console.warn('[sync] wallet changed during sync, discarding results',
+          { syncWalletId, currentWalletId });
+        return;
+      }
+
+      console.log('[sync] writing results for wallet', syncWalletId?.slice(0, 8),
+        'hedgeStatus:', hedgeStatusResult ? {
+          isHedged: hedgeStatusResult.isHedged,
+          lighterUsdc: hedgeStatusResult.lighterUsdc,
+        } : null,
+        'ethAddr:', syncEthWallet?.address?.slice(0, 10));
+
       // Fetch Arbitrum USDC balance in the background (non-blocking)
-      if (ethWallet) {
-        fetchArbUsdcBalance(ethWallet.address)
-          .then((bal) => setUsdcBalance(bal))
+      if (syncEthWallet) {
+        fetchArbUsdcBalance(syncEthWallet.address)
+          .then((bal) => {
+            // Guard against stale async result
+            if (useWalletStore.getState().activeWalletId === syncWalletId) setUsdcBalance(bal);
+          })
           .catch(() => {});
       }
       setXmrInfo(info);
       setTransactions(txData.transactions);
       setLastSyncAt(Date.now());
-      if (hedgeStatusResult) setHedgeStatus(hedgeStatusResult);
+      setHedgeStatus(hedgeStatusResult ?? null);
       if (market) setLighterMarket(market);
 
       // Auto-rotate receive subaddress if it has been used.
@@ -96,7 +145,7 @@ export function HomeScreen() {
         );
         if (usedAddresses.has(receiveAddress)) {
           // Silently generate the next subaddress in the background
-          createSubaddress(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate)
+          createSubaddress(syncXmrKeys.primaryAddress, syncXmrKeys.viewKeyPrivate)
             .then(({ address, index }) => setReceiveAddress(address, index))
             .catch(() => {}); // best-effort; user can tap "New Address" manually
         }
@@ -132,6 +181,88 @@ export function HomeScreen() {
     }
   }
 
+  // ── Wallet switching ───────────────────────────────────────────────────────
+  async function handleSwitchWallet(walletId: string) {
+    if (walletId === activeWalletId) {
+      setShowSwitcher(false);
+      return;
+    }
+
+    // Save current wallet's cached state.
+    // Do NOT cache hedgeStatus or lighterMarket — these are fetched fresh
+    // from the proxy on sync and caching them risks cross-contamination
+    // between wallets (the store may still hold data from a previous wallet).
+    if (activeWalletId) {
+      const state = useWalletStore.getState();
+      saveWalletCache(activeWalletId, {
+        xmrInfo: state.xmrInfo,
+        transactions: state.transactions,
+        lastSyncAt: state.lastSyncAt,
+        ethBalanceEth: state.ethBalanceEth,
+        usdcBalance: state.usdcBalance,
+        hedgeStatus: null,
+        lighterMarket: null,
+        sessionToken: state.sessionToken,
+        receiveAddress: state.receiveAddress,
+        receiveAddressIndex: state.receiveAddressIndex,
+      });
+    }
+
+    // Load new wallet's keys from in-memory cache
+    // The PIN is already verified and all wallets were decrypted on unlock.
+    // For now, we re-derive from the stored mnemonic using the cached PIN.
+    try {
+      const cachedPin = (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin;
+      if (!cachedPin) throw new Error('PIN not cached');
+
+      const mnemonic = await loadKeystore(cachedPin, walletId);
+      const seed = await mnemonicToSeed(mnemonic);
+      const xmrKeys = deriveXmrKeys(xmrSeedFromMaster(seed));
+      const ethWallet = deriveEthWallet(ethSeedFromMaster(seed));
+
+      // Set active wallet
+      setActiveWalletId(walletId);
+      setActiveSessionWallet(walletId);
+      updateSettings({ lastActiveWalletId: walletId });
+
+      // Clear stale state from previous wallet before restoring new one
+      console.log('[switch] clearing state, switching from', activeWalletId?.slice(0, 8), 'to', walletId.slice(0, 8));
+      const store = useWalletStore.getState();
+      store.setHedgeStatus(null);
+      store.setXmrInfo(null);
+      store.setLighterMarket(null);
+      store.setSessionToken(null);
+      store.setReceiveAddress(null, 0);
+
+      // Restore cached state if available
+      const cached = loadWalletCache(walletId);
+      console.log('[switch] cached state:', cached ? {
+        hasXmrInfo: !!cached.xmrInfo,
+        hasHedgeStatus: !!cached.hedgeStatus,
+        hasLighterMarket: !!cached.lighterMarket,
+        usdcBalance: cached.usdcBalance,
+        hasSessionToken: !!cached.sessionToken,
+        sessionTokenPrefix: cached.sessionToken?.slice(0, 8),
+      } : null);
+      if (cached) {
+        if (cached.xmrInfo) store.setXmrInfo(cached.xmrInfo);
+        if (cached.hedgeStatus) store.setHedgeStatus(cached.hedgeStatus);
+        if (cached.lighterMarket) store.setLighterMarket(cached.lighterMarket);
+        if (cached.usdcBalance) store.setUsdcBalance(cached.usdcBalance);
+        if (cached.sessionToken) {
+          store.setSessionToken(cached.sessionToken);
+          setProxySessionToken(cached.sessionToken, walletId);
+        }
+      }
+
+      // Activate keys (triggers balance sync via useEffect)
+      setKeys(mnemonic, xmrKeys, ethWallet);
+      setShowSwitcher(false);
+    } catch (err) {
+      console.error('Wallet switch failed:', err);
+    }
+  }
+
   const isHedged = hedgeStatus?.isHedged ?? false;
 
   // Only show XMR balance once synced. While xmrInfo is null we're still loading.
@@ -141,8 +272,38 @@ export function HomeScreen() {
   const hasXmr = xmrBalance !== null && xmrBalance > 0;
   const synced  = xmrInfo !== null;
 
+  if (showAddWallet) {
+    const cachedPin = (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin;
+    return (
+      <AddWalletFlow
+        pin={cachedPin ?? ''}
+        onComplete={() => setShowAddWallet(false)}
+        onCancel={() => setShowAddWallet(false)}
+      />
+    );
+  }
+
   return (
     <div className="screen home-screen">
+      {/* Wallet header — tap to open switcher */}
+      {walletList.length > 0 && (
+        <button
+          className="wallet-header-btn"
+          onClick={() => setShowSwitcher(true)}
+        >
+          <span className="wallet-header-btn__label">{walletLabel}</span>
+          <span className="wallet-header-btn__chevron">▾</span>
+        </button>
+      )}
+
+      {showSwitcher && (
+        <WalletSwitcher
+          onClose={() => setShowSwitcher(false)}
+          onSwitch={handleSwitchWallet}
+          onAddWallet={() => { setShowSwitcher(false); setShowAddWallet(true); }}
+        />
+      )}
+
       {syncProgress && (
         <div className="wasm-sync-bar">
           <div className="wasm-sync-bar__label">
@@ -178,7 +339,7 @@ export function HomeScreen() {
               <span className="hedge-status-bar__icon">&#x1F512;</span>
               <div>
                 <div className="hedge-status-bar__title">
-                  {hedgeStatus?.hedgeCurrency === 'EUR' ? 'EUR' : 'USD'} Value Locked
+                  {hedgeStatus?.hedgeCurrency ?? 'USD'} Value Locked
                 </div>
                 {hedgeStatus?.position && (
                   <div className="hedge-status-bar__detail">

@@ -66,7 +66,8 @@ function EarningsTable({ earnings }: { earnings: BotEarnings }) {
 }
 
 export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChange, onApyChange }: BotToggleProps) {
-  const { xmrKeys, ethWallet, sessionToken, setSessionToken, lighterMarket } = useWalletStore();
+  const { xmrKeys, ethWallet, sessionToken, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
+  const botActiveKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
 
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
   const [earnings, setEarnings] = useState<BotEarnings | null>(null);
@@ -104,14 +105,45 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
       const e = await getBotEarnings();
       setEarnings(e);
       // Compute realised APY: total earnings / days since first fill, annualised.
-      // Denominator = total wallet value (XMR in USD + Lighter collateral).
+      //
+      // Capital base: use the hedge entry value (entryPrice * size) as a stable
+      // denominator. Current lighterUsdc fluctuates with top-ups/withdrawals and
+      // unrealized PnL, which causes wild APY swings. The entry value represents
+      // the capital that was actually deployed when the hedge was opened.
+      //
+      // Total capital = XMR value at entry price + USDC collateral posted.
+      // Since the hedge is delta-neutral, XMR value ≈ short notional ≈ entryPrice * size.
+      // The total deployed capital is roughly: short notional + collateral = short notional / (1 - margin%).
+      // Simplification: use short notional + original collateral ≈ 2 * short notional for typical 50/50 split,
+      // BUT the cleanest approach is: total wallet value at entry = entryPrice * xmrBalance + original collateral.
+      // We approximate original collateral as lighterUsdc - unrealizedPnl (strips out PnL drift).
       const markPrice = lighterMarket?.markPrice ?? 0;
-      const totalWalletUsd = xmrBalance * markPrice + (lighterUsdc ?? 0);
-      if (totalWalletUsd > 0 && e.firstFillAt > 0) {
-        const daysActive = Math.max((Date.now() / 1000 - e.firstFillAt) / 86400, 1 / 1440);
+      const fundingApy = lighterMarket?.annualizedFundingPct
+        ?? hedgePosition?.annualizedFundingPct ?? null;
+      const daysActive = e.firstFillAt > 0
+        ? (Date.now() / 1000 - e.firstFillAt) / 86400
+        : 0;
+
+      // Show funding rate as baseline until we have 1+ day of spread data
+      if (daysActive < 1 || markPrice <= 0) {
+        onApyChange?.(fundingApy);
+      } else {
         const totalEarned = e.spreadTotal + e.fundingTotal;
-        const apy = (totalEarned / daysActive) * 365 / totalWalletUsd * 100;
-        onApyChange?.(apy);
+
+        // Use proxy-provided initial capital when available (most accurate),
+        // otherwise fall back to entry-price-based calculation.
+        let capitalBase = botStatus?.initialCapitalUsd ?? 0;
+        if (capitalBase <= 0) {
+          const entryPrice = hedgePosition?.entryPrice ?? markPrice;
+          const unrealizedPnl = hedgePosition?.unrealizedPnl ?? 0;
+          const originalCollateral = Math.max((lighterUsdc ?? 0) - unrealizedPnl, 0);
+          capitalBase = xmrBalance * entryPrice + originalCollateral;
+        }
+
+        if (capitalBase > 0) {
+          const apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
+          onApyChange?.(apy);
+        }
       }
     } catch { /* non-critical */ }
   }
@@ -124,22 +156,47 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
   }
 
   useEffect(() => {
+    console.log('[BotToggle] useEffect sessionToken=', sessionToken?.slice(0, 8) ?? 'null',
+      'ethWallet=', !!ethWallet, 'botStatus=', botStatus?.status ?? 'null',
+      'activeWalletId=', activeWalletId?.slice(0, 8));
     if (sessionToken) {
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
       setReconnecting(false);
+      // Skip status fetch if handleStart is already in progress — it will
+      // call fetchStatus + startPolling itself once the bot is running.
+      if (busy) {
+        console.log('[BotToggle] sessionToken set while busy (handleStart in progress), skipping status fetch');
+        return;
+      }
       (async () => {
         const s = await fetchStatus();
+        console.log('[BotToggle] fetchStatus result:', s?.status, 'targetXmr:', s?.targetXmr);
         if (!s) return;
         if (s.status === 'running' || s.status === 'paused') {
           startPolling();
         } else if (s.status === 'stopped' &&
-            (s.targetXmr !== 0 || localStorage.getItem('nerodolla_bot_active') === 'true')) {
+            (s.targetXmr !== 0 || localStorage.getItem(botActiveKey) === 'true')) {
           handleStart();
         }
       })();
     } else if (ethWallet && !botStatus) {
-      setReconnecting(true);
-      reconnectTimerRef.current = setTimeout(() => setReconnecting(false), 8_000);
+      // No session token — create one and check if a bot is already running
+      // on the proxy (e.g. started from another device/session).
+      if (busy) {
+        console.log('[BotToggle] no sessionToken, busy=true, waiting for handleStart to finish');
+      } else {
+        console.log('[BotToggle] no sessionToken, creating session to check bot status');
+        setReconnecting(true);
+        (async () => {
+          try {
+            await ensureSession();
+            // useEffect will re-fire when sessionToken is set,
+            // which will call fetchStatus and detect the running bot.
+          } catch {
+            setReconnecting(false);
+          }
+        })();
+      }
     }
     return () => {
       stopPolling();
@@ -153,35 +210,45 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
+  async function ensureSession() {
+    if (!ethWallet) return;
+    let zkPrivKey = await loadZkKey(ethWallet.privateKey);
+    if (!zkPrivKey) {
+      try {
+        zkPrivKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
+        await saveZkKey(ethWallet.privateKey, zkPrivKey);
+      } catch {
+        // Legacy key doesn't belong to this wallet — register a new one
+        const { newZkPrivKey, sessionToken: token } = await reRegisterZkKey(ethWallet.address, ethWallet.privateKey);
+        await saveZkKey(ethWallet.privateKey, newZkPrivKey);
+        setSessionToken(token);
+        setProxySessionToken(token);
+        return;
+      }
+    }
+    try {
+      const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, zkPrivKey);
+      setSessionToken(token);
+      setProxySessionToken(token);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('zk_key_rejected')) {
+        clearZkKey();
+        // Re-register a fresh key on-chain
+        const { newZkPrivKey, sessionToken: token } = await reRegisterZkKey(ethWallet.address, ethWallet.privateKey);
+        await saveZkKey(ethWallet.privateKey, newZkPrivKey);
+        setSessionToken(token);
+        setProxySessionToken(token);
+      } else {
+        throw err;
+      }
+    }
+  }
+
   async function handleStart() {
     if (!xmrKeys || !ethWallet) return;
     setBusy(true);
     setLocalError(null);
     try {
-      const ensureSession = async () => {
-        let zkPrivKey = await loadZkKey(ethWallet.privateKey);
-        if (!zkPrivKey) {
-          zkPrivKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
-          await saveZkKey(ethWallet.privateKey, zkPrivKey);
-        }
-        try {
-          const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, zkPrivKey);
-          setSessionToken(token);
-          setProxySessionToken(token);
-        } catch (err) {
-          if (err instanceof Error && err.message.includes('zk_key_rejected')) {
-            clearZkKey();
-            zkPrivKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
-            await saveZkKey(ethWallet.privateKey, zkPrivKey);
-            const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, zkPrivKey);
-            setSessionToken(token);
-            setProxySessionToken(token);
-          } else {
-            throw err;
-          }
-        }
-      };
-
       if (!sessionToken) await ensureSession();
       try {
         await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
@@ -193,7 +260,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
           throw err;
         }
       }
-      localStorage.setItem('nerodolla_bot_active', 'true');
+      localStorage.setItem(botActiveKey, 'true');
       await fetchStatus();
       startPolling();
     } catch (err) {
@@ -208,7 +275,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
     setLocalError(null);
     try {
       await stopBot();
-      localStorage.removeItem('nerodolla_bot_active');
+      localStorage.removeItem(botActiveKey);
       stopPolling();
       setBotStatus(prev => prev ? { ...prev, status: 'stopped', openOrderCount: 0 } : null);
     } catch (err) {
@@ -228,7 +295,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
       setSessionToken(sessionToken);
       setProxySessionToken(sessionToken);
       await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
-      localStorage.setItem('nerodolla_bot_active', 'true');
+      localStorage.setItem(botActiveKey, 'true');
       await fetchStatus();
       startPolling();
     } catch (err) {
@@ -285,6 +352,16 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
                 <span className="bot-toggle__target">
                   {' '}(Avail ${botStatus.availableBalance.toFixed(2)})
                 </span>
+              </span>
+            </div>
+          )}
+
+          {/* Unrealized PnL */}
+          {hedgePosition && (
+            <div className="bot-toggle__stat-row">
+              <span>Unrealized PnL</span>
+              <span style={{ color: (hedgePosition.unrealizedPnl ?? 0) >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
+                {fmt(hedgePosition.unrealizedPnl ?? 0, 2)}
               </span>
             </div>
           )}

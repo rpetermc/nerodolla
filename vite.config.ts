@@ -6,6 +6,11 @@ import fs from 'fs';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+  },
   server: {
     host: '0.0.0.0',
     port: 3000,
@@ -33,6 +38,7 @@ export default defineConfig({
   build: {
     target: 'esnext',
     rollupOptions: {
+      external: ['monero-ts'],
       output: {
         manualChunks: {
           'ethers': ['ethers'],

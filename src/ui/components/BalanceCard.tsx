@@ -32,10 +32,11 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
     ? xmrUsdValue + lighterNetEquity
     : xmrUsdValue;
 
-  const isEurHedge = hedgeStatus?.hedgeCurrency === 'EUR';
-  const eurMarkPrice = hedgeStatus?.eurPosition?.markPrice ?? 0;
-  const totalEurValue = totalUsdValue !== null && eurMarkPrice > 0
-    ? totalUsdValue / eurMarkPrice
+  const hedgeCurrency = hedgeStatus?.hedgeCurrency ?? 'USD';
+  const isNonUsdHedge = hedgeCurrency !== 'USD';
+  const currencyMarkPrice = hedgeStatus?.eurPosition?.markPrice ?? 0;
+  const totalCurrencyValue = totalUsdValue !== null && currencyMarkPrice > 0
+    ? totalUsdValue / currencyMarkPrice
     : null;
 
   const hasLocked  = xmrInfo && xmrInfo.lockedFunds > 0n;
@@ -52,7 +53,7 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
       <div className="balance-card__header">
         <span className="balance-card__label">
           {isHedged
-            ? `Total Value (${isEurHedge ? 'EUR' : 'USD'})`
+            ? `Total Value (${hedgeCurrency})`
             : 'XMR Balance'}
         </span>
         <button
@@ -67,13 +68,16 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
 
       {isHedged ? (
         <>
-          {/* Hedged: prominent total value in hedge currency */}
+          {/* Hedged: prominent total value in hedge currency + USD subtitle */}
           <div className="balance-card__amount">
             <span className="balance-card__xmr">
-              {isEurHedge
-                ? (totalEurValue !== null ? `€${totalEurValue.toFixed(2)}` : '—')
+              {isNonUsdHedge && totalCurrencyValue !== null
+                ? `${hedgeCurrency === 'EUR' ? '€' : hedgeCurrency === 'GBP' ? '£' : ''}${totalCurrencyValue.toFixed(hedgeCurrency === 'XAU' ? 4 : hedgeCurrency === 'XAG' ? 2 : 2)}${hedgeCurrency === 'XAU' || hedgeCurrency === 'XAG' ? ' oz' : ''}`
                 : (totalUsdValue !== null ? `$${totalUsdValue.toFixed(2)}` : '—')}
             </span>
+            {isNonUsdHedge && totalUsdValue !== null && (
+              <span className="balance-card__usd">≈ ${totalUsdValue.toFixed(2)}</span>
+            )}
           </div>
 
           {/* Breakdown: XMR component + USDC on Lighter */}

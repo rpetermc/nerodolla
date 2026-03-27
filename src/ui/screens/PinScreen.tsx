@@ -3,16 +3,17 @@
  * Decrypts the mnemonic with the entered PIN and calls setKeys.
  */
 import { useState } from 'react';
-import { useWalletStore } from '../../store/wallet';
-import { loadKeystore, clearKeystore, loadZkKey, saveZkKey, clearZkKey } from '../../wallet/keystore';
+import { useWalletStore, useSettingsStore } from '../../store/wallet';
+import { loadKeystore, clearKeystore, loadZkKey, saveZkKey, clearZkKey, getWalletList, needsMigration, migrateLegacyWallet } from '../../wallet/keystore';
 import { mnemonicToSeed, xmrSeedFromMaster, ethSeedFromMaster } from '../../wallet/seed';
 import { deriveXmrKeys } from '../../wallet/xmr';
 import { deriveEthWallet } from '../../wallet/eth';
-import { initLighterSession, setProxySessionToken, setSessionRenewer, migrateLegacyZkKey } from '../../backend/lighter';
+import { initLighterSession, setProxySessionToken, setSessionRenewer, setActiveSessionWallet, migrateLegacyZkKey, reRegisterZkKey } from '../../backend/lighter';
 import { PinPad } from '../components/PinPad';
 
 export function PinScreen() {
-  const { setKeys, setSessionToken } = useWalletStore();
+  const { setKeys, setSessionToken, setActiveWalletId, setWalletList } = useWalletStore();
+  const { lastActiveWalletId, updateSettings } = useSettingsStore();
   type PinStatus = 'idle' | 'verifying' | 'wrong';
   const [status, setStatus]   = useState<PinStatus>('idle');
   const [errMsg, setErrMsg]   = useState<string | null>(null);
@@ -22,7 +23,41 @@ export function PinScreen() {
     setStatus('verifying');
     setErrMsg(null);
     try {
-      const mnemonic  = await loadKeystore(pin);
+      // Cache PIN for wallet switching (held in memory only, cleared on lock)
+      (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin = pin;
+
+      // Handle migration from single-wallet to multi-wallet
+      if (needsMigration()) {
+        // Decrypt legacy keystore to derive walletId
+        const legacyMnemonic = await loadKeystore(pin);
+        const legacySeed = await mnemonicToSeed(legacyMnemonic);
+        const legacyXmrKeys = deriveXmrKeys(xmrSeedFromMaster(legacySeed));
+        const walletId = legacyXmrKeys.primaryAddress.slice(0, 8);
+        await migrateLegacyWallet(walletId, pin);
+      }
+
+      // Determine which wallet to activate
+      const wallets = getWalletList();
+      setWalletList(wallets);
+
+      let activeId: string | null = null;
+      let mnemonic: string;
+
+      if (wallets.length > 0) {
+        // Multi-wallet: activate last-used or first
+        activeId = lastActiveWalletId && wallets.some(w => w.id === lastActiveWalletId)
+          ? lastActiveWalletId
+          : wallets[0].id;
+        mnemonic = await loadKeystore(pin, activeId);
+      } else {
+        // Legacy single-wallet (no migration needed — fresh install or already migrated)
+        mnemonic = await loadKeystore(pin);
+      }
+
+      setActiveWalletId(activeId);
+      setActiveSessionWallet(activeId);
+      if (activeId) updateSettings({ lastActiveWalletId: activeId });
+
       const seed      = await mnemonicToSeed(mnemonic);
       const xmrKeys   = deriveXmrKeys(xmrSeedFromMaster(seed));
       const ethWallet = deriveEthWallet(ethSeedFromMaster(seed));
@@ -31,7 +66,7 @@ export function PinScreen() {
       // Falls back to migrating the key from the proxy when none is found locally
       // (covers browser users who first set up on Android, or cross-device access).
       // The session renewer also handles stale keys so 401s auto-recover mid-session.
-      loadZkKey(ethWallet.privateKey).then(async (zkPrivKey) => {
+      loadZkKey(ethWallet.privateKey, activeId ?? undefined).then(async (zkPrivKey) => {
         let key = zkPrivKey;
 
         // No key in localStorage — try pulling it from the proxy's legacy setup file.
@@ -39,7 +74,7 @@ export function PinScreen() {
         if (!key) {
           try {
             key = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
-            if (key) await saveZkKey(ethWallet.privateKey, key);
+            if (key) await saveZkKey(ethWallet.privateKey, key, activeId ?? undefined);
           } catch { /* proxy may not have a key yet — will be set up on first hedge */ }
         }
 
@@ -48,26 +83,34 @@ export function PinScreen() {
         // applySession stores the token and registers an auto-renewer.
         // The renewer handles zk_key_rejected by pulling the latest key from the proxy,
         // so cross-device key rotation (e.g. Android re-registers the key) is transparent.
+        const wid = activeId ?? undefined;
         const applySession = (token: string, currentKey: string) => {
           setSessionToken(token);
-          setProxySessionToken(token);
+          setProxySessionToken(token, wid);
           setSessionRenewer(async () => {
             try {
               const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, currentKey);
               setSessionToken(newToken);
-              setProxySessionToken(newToken);
+              setProxySessionToken(newToken, wid);
             } catch (renewErr) {
               if (renewErr instanceof Error && renewErr.message.includes('zk_key_rejected')) {
-                // Key was rotated on another device — migrate the current key from the proxy
-                const freshKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
-                await saveZkKey(ethWallet.privateKey, freshKey);
-                const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, freshKey);
-                applySession(newToken, freshKey); // updates token + re-registers renewer with fresh key
+                // Key doesn't match on-chain — try migration first, then re-register
+                try {
+                  const freshKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
+                  await saveZkKey(ethWallet.privateKey, freshKey, wid);
+                  const newToken = await initLighterSession(ethWallet.address, ethWallet.privateKey, freshKey);
+                  applySession(newToken, freshKey);
+                } catch {
+                  // Migration failed — re-register the key on-chain
+                  const { newZkPrivKey, sessionToken } = await reRegisterZkKey(ethWallet.address, ethWallet.privateKey);
+                  await saveZkKey(ethWallet.privateKey, newZkPrivKey, wid);
+                  applySession(sessionToken, newZkPrivKey);
+                }
               } else {
                 throw renewErr;
               }
             }
-          });
+          }, wid);
         };
 
         try {
@@ -75,13 +118,21 @@ export function PinScreen() {
           applySession(token, key);
         } catch (err) {
           if (err instanceof Error && err.message.includes('zk_key_rejected')) {
+            clearZkKey(wid);
             try {
-              clearZkKey();
+              // Try migration first (cross-device key sharing)
               const freshKey = await migrateLegacyZkKey(ethWallet.address, ethWallet.privateKey);
-              await saveZkKey(ethWallet.privateKey, freshKey);
+              await saveZkKey(ethWallet.privateKey, freshKey, wid);
               const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, freshKey);
               applySession(token, freshKey);
-            } catch { /* non-fatal */ }
+            } catch {
+              try {
+                // Migration failed — re-register key on-chain
+                const { newZkPrivKey, sessionToken } = await reRegisterZkKey(ethWallet.address, ethWallet.privateKey);
+                await saveZkKey(ethWallet.privateKey, newZkPrivKey, wid);
+                applySession(sessionToken, newZkPrivKey);
+              } catch { /* non-fatal */ }
+            }
           }
           // other errors: non-fatal — hedge features will show error when needed
         }

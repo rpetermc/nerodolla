@@ -3,6 +3,11 @@ import { useWalletStore, useSettingsStore } from '../../store/wallet';
 import type { XmrSyncMode } from '../../store/wallet';
 import { pingLws } from '../../backend/lws';
 import { initWalletConnect, pair, disconnectSession } from '../../backend/walletconnect';
+import {
+  getWalletList, updateWalletLabel, removeWallet as removeWalletFromStorage,
+  loadKeystore, changePinAllWallets,
+} from '../../wallet/keystore';
+import { PinPad } from '../components/PinPad';
 
 const DEFAULT_LWS_URL = '/lws';
 
@@ -20,7 +25,7 @@ const PFN_OPTIONS = [
 ];
 
 export function SettingsScreen() {
-  const { navigate, lock, wcSession, setWcSession } = useWalletStore();
+  const { navigate, lock, wcSession, setWcSession, activeWalletId, walletList, setWalletList, xmrKeys } = useWalletStore();
   const {
     xmrSyncMode, remoteLwsUrl, nodeUrl, lighterProxyUrl, network, ethRpcUrl, updateSettings,
   } = useSettingsStore();
@@ -50,6 +55,21 @@ export function SettingsScreen() {
   const [wcUri, setWcUri] = useState('');
   const [wcConnecting, setWcConnecting] = useState(false);
   const [wcError, setWcError] = useState<string | null>(null);
+
+  // Wallet management
+  const activeWallet = walletList.find(w => w.id === activeWalletId);
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelInput, setLabelInput] = useState(activeWallet?.label ?? '');
+  const [showMnemonic, setShowMnemonic] = useState(false);
+  const [mnemonicRevealed, setMnemonicRevealed] = useState<string | null>(null);
+  const [pinPrompt, setPinPrompt] = useState<'reveal' | 'change-old' | null>(null);
+  const [changePinOld, setChangePinOld] = useState('');
+  const [changePinStep, setChangePinStep] = useState<'old' | 'new' | 'confirm' | null>(null);
+  const [changePinNew, setChangePinNew] = useState('');
+  const [pinChangeError, setPinChangeError] = useState<string | null>(null);
+  const [pinChangeSuccess, setPinChangeSuccess] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [walletActionBusy, setWalletActionBusy] = useState(false);
 
   async function handleWcConnect() {
     const trimmed = wcUri.trim();
@@ -87,6 +107,90 @@ export function SettingsScreen() {
     setLwsPingResult(ok);
     setIsPinging(false);
   }
+
+  // ── Wallet management handlers ──────────────────────────────────────────────
+
+  function handleSaveLabel() {
+    if (!activeWalletId || !labelInput.trim()) return;
+    updateWalletLabel(activeWalletId, labelInput.trim());
+    setWalletList(getWalletList());
+    setEditingLabel(false);
+  }
+
+  async function handleRevealMnemonic(pin: string) {
+    setWalletActionBusy(true);
+    try {
+      const mnemonic = await loadKeystore(pin, activeWalletId ?? undefined);
+      setMnemonicRevealed(mnemonic);
+      setShowMnemonic(true);
+      setPinPrompt(null);
+    } catch {
+      setPinChangeError('Incorrect PIN');
+    } finally {
+      setWalletActionBusy(false);
+    }
+  }
+
+  async function handleChangePinOld(pin: string) {
+    setWalletActionBusy(true);
+    setPinChangeError(null);
+    try {
+      // Verify old PIN by trying to decrypt
+      await loadKeystore(pin, activeWalletId ?? undefined);
+      setChangePinOld(pin);
+      setChangePinStep('new');
+    } catch {
+      setPinChangeError('Incorrect PIN');
+    } finally {
+      setWalletActionBusy(false);
+    }
+  }
+
+  function handleChangePinNew(pin: string) {
+    setChangePinNew(pin);
+    setChangePinStep('confirm');
+    setPinChangeError(null);
+  }
+
+  async function handleChangePinConfirm(pin: string) {
+    if (pin !== changePinNew) {
+      setPinChangeError('PINs do not match');
+      setChangePinStep('new');
+      setChangePinNew('');
+      return;
+    }
+    setWalletActionBusy(true);
+    setPinChangeError(null);
+    try {
+      await changePinAllWallets(changePinOld, pin);
+      // Update cached PIN
+      (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin = pin;
+      setPinChangeSuccess(true);
+      setChangePinStep(null);
+      setTimeout(() => setPinChangeSuccess(false), 3000);
+    } catch (err) {
+      setPinChangeError(err instanceof Error ? err.message : 'Failed to change PIN');
+    } finally {
+      setWalletActionBusy(false);
+    }
+  }
+
+  function handleDeleteWallet() {
+    if (!activeWalletId) return;
+    removeWalletFromStorage(activeWalletId);
+    const updated = getWalletList();
+    setWalletList(updated);
+    setConfirmDelete(false);
+    if (updated.length === 0) {
+      // Last wallet deleted — go to setup
+      window.location.reload();
+    } else {
+      // Switch to first remaining wallet — requires full reload to re-derive keys
+      window.location.reload();
+    }
+  }
+
+  // ── Settings handlers ─────────────────────────────────────────────────────
 
   function handleSave() {
     const effectiveLws = lwsSelected !== 'custom' ? lwsSelected : lwsUrl;
@@ -309,13 +413,152 @@ export function SettingsScreen() {
         )}
       </section>
 
-      <section className="settings-section settings-section--danger">
+      {/* ── Wallet management ──────────────────────────────────────────────── */}
+      {activeWallet && (
+        <section className="settings-section">
+          <h2 className="settings-section__title">Active Wallet</h2>
+
+          {/* Rename */}
+          <div className="settings-row">
+            <label className="settings-label">Wallet Name</label>
+            {editingLabel ? (
+              <div className="settings-wallet-rename">
+                <input
+                  className="settings-input"
+                  value={labelInput}
+                  onChange={e => setLabelInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleSaveLabel(); }}
+                  maxLength={24}
+                  autoFocus
+                />
+                <button className="btn btn--xs btn--primary" onClick={handleSaveLabel}>Save</button>
+                <button className="btn btn--xs btn--ghost" onClick={() => setEditingLabel(false)}>Cancel</button>
+              </div>
+            ) : (
+              <div className="settings-wallet-rename">
+                <span className="settings-wallet-name">{activeWallet.label}</span>
+                <button
+                  className="btn btn--xs btn--ghost"
+                  onClick={() => { setLabelInput(activeWallet.label); setEditingLabel(true); }}
+                >
+                  Rename
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Wallet ID (address prefix) */}
+          <div className="settings-row">
+            <label className="settings-label">Address Prefix</label>
+            <span className="settings-mono">{activeWalletId}...</span>
+          </div>
+
+          {/* Show mnemonic */}
+          {pinPrompt === 'reveal' ? (
+            <div className="settings-row">
+              {walletActionBusy ? (
+                <div className="pin-screen__verifying"><div className="swap-flow__spinner" /><p>Decrypting...</p></div>
+              ) : (
+                <PinPad
+                  label="Enter PIN to reveal recovery phrase"
+                  onComplete={handleRevealMnemonic}
+                  error={pinChangeError}
+                />
+              )}
+              <button className="btn btn--ghost btn--sm" onClick={() => { setPinPrompt(null); setPinChangeError(null); }}>Cancel</button>
+            </div>
+          ) : showMnemonic && mnemonicRevealed ? (
+            <div className="settings-row">
+              <label className="settings-label">Recovery Phrase</label>
+              <div className="settings-mnemonic-reveal">
+                <div className="mnemonic-grid mnemonic-grid--small">
+                  {mnemonicRevealed.split(' ').map((w, i) => (
+                    <div key={i} className="mnemonic-word mnemonic-word--small">
+                      <span className="mnemonic-word__num">{i + 1}</span>
+                      <span className="mnemonic-word__text">{w}</span>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn btn--ghost btn--sm" onClick={() => { setShowMnemonic(false); setMnemonicRevealed(null); }}>
+                  Hide
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="settings-row">
+              <button className="btn btn--ghost" onClick={() => setPinPrompt('reveal')}>
+                Show Recovery Phrase
+              </button>
+            </div>
+          )}
+
+          {/* Delete wallet */}
+          <div className="settings-row">
+            {confirmDelete ? (
+              <div className="settings-delete-confirm">
+                <p className="settings-delete-warn">
+                  This will remove "{activeWallet.label}" from this device.
+                  Make sure you have backed up your recovery phrase!
+                </p>
+                <div className="settings-delete-actions">
+                  <button className="btn btn--danger btn--sm" onClick={handleDeleteWallet}>
+                    Delete Wallet
+                  </button>
+                  <button className="btn btn--ghost btn--sm" onClick={() => setConfirmDelete(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button className="btn btn--ghost" onClick={() => setConfirmDelete(true)}>
+                Delete This Wallet
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Change PIN ──────────────────────────────────────────────────────── */}
+      <section className="settings-section">
         <h2 className="settings-section__title">Security</h2>
+
+        {changePinStep ? (
+          <div className="settings-row">
+            {walletActionBusy ? (
+              <div className="pin-screen__verifying"><div className="swap-flow__spinner" /><p>Updating PIN...</p></div>
+            ) : (
+              <PinPad
+                label={
+                  changePinStep === 'old' ? 'Enter current PIN' :
+                  changePinStep === 'new' ? 'Enter new PIN' :
+                  'Confirm new PIN'
+                }
+                onComplete={
+                  changePinStep === 'old' ? handleChangePinOld :
+                  changePinStep === 'new' ? handleChangePinNew :
+                  handleChangePinConfirm
+                }
+                error={pinChangeError}
+              />
+            )}
+            <button className="btn btn--ghost btn--sm" onClick={() => { setChangePinStep(null); setPinChangeError(null); }}>Cancel</button>
+          </div>
+        ) : (
+          <>
+            <button className="btn btn--ghost" onClick={() => setChangePinStep('old')}>
+              {pinChangeSuccess ? 'PIN Changed' : 'Change PIN'}
+            </button>
+            <p className="settings-hint">
+              Changes the PIN for all wallets.
+            </p>
+          </>
+        )}
+
         <button className="btn btn--danger" onClick={lock}>
           Lock Wallet
         </button>
         <p className="settings-hint">
-          Clears keys from memory. You will need your recovery phrase to re-access.
+          Clears keys from memory. You will need your PIN to re-access.
         </p>
       </section>
     </div>

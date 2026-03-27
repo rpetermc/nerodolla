@@ -9,7 +9,8 @@ import { generateMnemonic, mnemonicToSeed, xmrSeedFromMaster, ethSeedFromMaster 
 import { deriveXmrKeys } from '../../wallet/xmr';
 import { deriveEthWallet } from '../../wallet/eth';
 import { getChainHeight, initWallet } from '../../backend/lws';
-import { saveKeystore } from '../../wallet/keystore';
+import { saveKeystore, addWallet, getWalletList } from '../../wallet/keystore';
+import { setActiveSessionWallet } from '../../backend/lighter';
 import { PinPad } from '../components/PinPad';
 import type { XmrKeys } from '../../wallet/xmr';
 import type { EthWallet } from '../../wallet/eth';
@@ -23,7 +24,7 @@ interface DerivedWallet {
 }
 
 export function SetupScreen() {
-  const { setKeys, setWalletCreatedHeight, setError } = useWalletStore();
+  const { setKeys, setWalletCreatedHeight, setError, setActiveWalletId, setWalletList } = useWalletStore();
   const { updateSettings } = useSettingsStore();
 
   const [mode, setMode]               = useState<SetupMode>('welcome');
@@ -126,7 +127,30 @@ export function SetupScreen() {
     if (!pendingWallet) return;
     setIsLoading(true);
     try {
-      await saveKeystore(pendingWallet.mnemonic, pin);
+      // Derive walletId from XMR address
+      const walletId = pendingWallet.xmrKeys.primaryAddress.slice(0, 8);
+
+      // Cache PIN for wallet switching
+      (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin = pin;
+
+      // Save encrypted keystore with walletId
+      await saveKeystore(pendingWallet.mnemonic, pin, walletId);
+
+      // Create wallet list entry
+      addWallet({
+        id: walletId,
+        label: 'Wallet 1',
+        createdAt: Date.now(),
+        restoreHeight: createdHeight,
+        hedgeCurrency: 'USD',
+      });
+
+      // Set up multi-wallet state
+      setWalletList(getWalletList());
+      setActiveWalletId(walletId);
+      setActiveSessionWallet(walletId);
+      updateSettings({ lastActiveWalletId: walletId });
+
       setKeys(pendingWallet.mnemonic, pendingWallet.xmrKeys, pendingWallet.ethWallet);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save keystore');
@@ -136,7 +160,8 @@ export function SetupScreen() {
   }
 
   async function handleCopyPhrase() {
-    await navigator.clipboard.writeText(mnemonic);
+    const heightStr = createdHeight !== null ? `\n\nRestore Height: ${createdHeight}` : '';
+    await navigator.clipboard.writeText(mnemonic + heightStr);
     setCopiedPhrase(true);
     setTimeout(() => setCopiedPhrase(false), 2000);
   }
@@ -212,17 +237,22 @@ export function SetupScreen() {
 
         <div className="setup-screen__copy-row">
           <button className="btn btn--ghost btn--small" onClick={handleCopyPhrase}>
-            {copiedPhrase ? '✓ Copied' : 'Copy phrase'}
+            {copiedPhrase ? '✓ Copied' : 'Copy phrase + height'}
           </button>
         </div>
 
+        <div className="setup-screen__seed-warning">
+          If you lose this recovery phrase, your funds are permanently unrecoverable.
+          No one — including NeroHedge — can restore access without it.
+          Write it down on paper and store it securely. Never share it with anyone.
+        </div>
         <label className="setup-screen__confirm-label">
           <input
             type="checkbox"
             checked={confirmed}
             onChange={(e) => setConfirmed(e.target.checked)}
           />
-          I have written down my recovery phrase and restore height
+          I have saved my recovery phrase and restore height in a secure location
         </label>
 
         <button

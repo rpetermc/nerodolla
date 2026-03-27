@@ -19,35 +19,76 @@ import type { WagyuOrder } from '../backend/wagyu';
 import type { HedgeStatus, LighterMarketInfo } from '../backend/lighter';
 import type { SyncProgress } from '../backend/wasm-wallet';
 import type { SignClientTypes, SessionTypes } from '@walletconnect/types';
+import type { WalletEntry } from '../wallet/keystore';
 
 // ── Swap persistence ───────────────────────────────────────────────────────────
 // Swap order IDs are safe to persist (no sensitive data).
 // Orders expire after ~2h on wagyu; we keep for 8h in case of slow bridging.
 
-const SWAP_PERSIST_KEY = 'nerodolla_pending_swap';
+const SWAP_PERSIST_PREFIX = 'nerodolla_pending_swap';
 const SWAP_PERSIST_TTL = 8 * 60 * 60 * 1000; // 8 hours
 
-function saveSwapState(orders: WagyuOrder[]) {
+function swapKey(walletId?: string | null): string {
+  return walletId ? `${SWAP_PERSIST_PREFIX}_${walletId}` : SWAP_PERSIST_PREFIX;
+}
+
+function saveSwapState(orders: WagyuOrder[], walletId?: string | null) {
   try {
-    localStorage.setItem(SWAP_PERSIST_KEY, JSON.stringify({ orders, savedAt: Date.now() }));
+    localStorage.setItem(swapKey(walletId), JSON.stringify({ orders, savedAt: Date.now() }));
   } catch { /* ignore */ }
 }
 
-function loadSwapState(): { swapOrders: WagyuOrder[]; swapStep: SwapStep } | null {
+function loadSwapState(walletId?: string | null): { swapOrders: WagyuOrder[]; swapStep: SwapStep } | null {
   try {
-    const raw = localStorage.getItem(SWAP_PERSIST_KEY);
+    const raw = localStorage.getItem(swapKey(walletId));
     if (!raw) return null;
     const { orders, savedAt } = JSON.parse(raw) as { orders: WagyuOrder[]; savedAt: number };
     if (!orders?.length || Date.now() - savedAt > SWAP_PERSIST_TTL) {
-      localStorage.removeItem(SWAP_PERSIST_KEY);
+      localStorage.removeItem(swapKey(walletId));
       return null;
     }
     return { swapOrders: orders, swapStep: 'monitoring' };
   } catch { return null; }
 }
 
-function clearSwapState() {
-  try { localStorage.removeItem(SWAP_PERSIST_KEY); } catch { /* ignore */ }
+function clearSwapState(walletId?: string | null) {
+  try { localStorage.removeItem(swapKey(walletId)); } catch { /* ignore */ }
+}
+
+// ── Per-wallet cache (saved on switch, restored on switch-back) ───────────────
+
+interface WalletCache {
+  xmrInfo: LwsAddressInfo | null;
+  transactions: LwsTransaction[];
+  lastSyncAt: number | null;
+  ethBalanceEth: string | null;
+  usdcBalance: string | null;
+  hedgeStatus: HedgeStatus | null;
+  lighterMarket: LighterMarketInfo | null;
+  sessionToken: string | null;
+  receiveAddress: string | null;
+  receiveAddressIndex: number;
+}
+
+export function saveWalletCache(walletId: string, cache: WalletCache) {
+  try {
+    localStorage.setItem(`nerodolla_wallet_cache_${walletId}`, JSON.stringify(cache));
+  } catch { /* ignore */ }
+}
+
+export function loadWalletCache(walletId: string): WalletCache | null {
+  try {
+    const raw = localStorage.getItem(`nerodolla_wallet_cache_${walletId}`);
+    if (!raw) return null;
+    const cache = JSON.parse(raw) as WalletCache;
+    // Never restore hedgeStatus/lighterMarket/receiveAddress from cache — these are
+    // per-wallet and must always be fetched fresh to avoid cross-contamination.
+    cache.hedgeStatus = null;
+    cache.lighterMarket = null;
+    cache.receiveAddress = null;
+    cache.receiveAddressIndex = 0;
+    return cache;
+  } catch { return null; }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -68,6 +109,10 @@ export type SwapStep =
   | 'error';
 
 export interface WalletState {
+  // ── Multi-wallet ──
+  activeWalletId: string | null;
+  walletList: WalletEntry[];
+
   // ── Wallet keys (in-memory only, never serialised) ──
   isUnlocked: boolean;
   mnemonic: string | null;
@@ -119,13 +164,17 @@ export interface WalletState {
 }
 
 export interface WalletActions {
+  // Multi-wallet
+  setActiveWalletId: (id: string | null) => void;
+  setWalletList: (list: WalletEntry[]) => void;
+
   // Wallet lifecycle
   setKeys: (mnemonic: string, xmrKeys: XmrKeys, ethWallet: EthWallet) => void;
   lock: () => void;
 
   // Balances
   setSyncProgress: (progress: SyncProgress | null) => void;
-  setXmrInfo: (info: LwsAddressInfo) => void;
+  setXmrInfo: (info: LwsAddressInfo | null) => void;
   setTransactions: (txs: LwsTransaction[]) => void;
   setSyncing: (syncing: boolean) => void;
   setLastSyncAt: (ts: number) => void;
@@ -136,7 +185,7 @@ export interface WalletActions {
   setWalletCreatedHeight: (height: number) => void;
 
   // Receive
-  setReceiveAddress: (address: string, index: number) => void;
+  setReceiveAddress: (address: string | null, index: number) => void;
 
   // Swap
   setSwapStep: (step: SwapStep) => void;
@@ -164,8 +213,11 @@ export interface WalletActions {
 
 // ── Store ─────────────────────────────────────────────────────────────────────
 
-export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
+export const useWalletStore = create<WalletState & WalletActions>()((set, get) => ({
   // Initial state
+  activeWalletId: null,
+  walletList: [],
+
   isUnlocked: false,
   mnemonic: null,
   xmrKeys: null,
@@ -204,15 +256,22 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
   error: null,
 
   // Actions
+  setActiveWalletId: (id) => set({ activeWalletId: id }),
+  setWalletList: (list) => set({ walletList: list }),
+
   setKeys: (mnemonic, xmrKeys, ethWallet) => {
+    const { activeWalletId } = get();
     // Restore any in-flight swap so monitoring resumes after re-login
-    const restored = loadSwapState();
+    const restored = loadSwapState(activeWalletId);
     set({ isUnlocked: true, mnemonic, xmrKeys, ethWallet, activeScreen: 'home', ...restored });
   },
 
-  lock: () =>
+  lock: () => {
+    // Clear cached PIN from memory
+    delete (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin;
     set({
       isUnlocked: false,
+      activeWalletId: null,
       mnemonic: null,
       xmrKeys: null,
       ethWallet: null,
@@ -229,7 +288,8 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
       lighterMarket: null,
       sessionToken: null,
       activeScreen: 'setup',
-    }),
+    });
+  },
 
   setSyncProgress: (progress) => set({ syncProgress: progress }),
   setXmrInfo: (info) => set({ xmrInfo: info }),
@@ -245,12 +305,14 @@ export const useWalletStore = create<WalletState & WalletActions>()((set) => ({
 
   setSwapStep: (step) => set({ swapStep: step }),
   setSwapOrders: (orders) => {
-    if (orders.length > 0) saveSwapState(orders);
+    const { activeWalletId } = get();
+    if (orders.length > 0) saveSwapState(orders, activeWalletId);
     set({ swapOrders: orders });
   },
   setSwapError: (err) => set({ swapError: err }),
   clearSwap: () => {
-    clearSwapState();
+    const { activeWalletId } = get();
+    clearSwapState(activeWalletId);
     set({ swapStep: 'idle', swapOrders: [], swapError: null });
   },
 
@@ -284,7 +346,9 @@ export interface SettingsState {
   currency: 'USD' | 'EUR' | 'BTC';
   /** Preferred hedge currency for new hedges — 'USD' or 'EUR'. Source of truth for open flow;
    *  live hedgeCurrency is derived from actual positions in getHedgeStatus(). */
-  hedgeCurrency: 'USD' | 'EUR';
+  hedgeCurrency: 'USD' | 'EUR' | 'GBP' | 'XAU' | 'XAG';
+  /** Last active wallet ID — restored on unlock */
+  lastActiveWalletId: string | null;
 }
 
 export interface SettingsActions {
@@ -304,12 +368,13 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       lighterProxyUrl: import.meta.env.VITE_PROXY_URL || 'https://proxy.example.com',
       currency: 'USD',
       hedgeCurrency: 'USD',
+      lastActiveWalletId: null,
 
       updateSettings: (patch) => set((s) => ({ ...s, ...patch })),
     }),
     {
       name: 'nerodolla-settings',
-      version: 7,
+      version: 8,
       migrate(stored: unknown) {
         const s = stored as Record<string, unknown>;
         // v1→v2: revert dead public LWS URLs back to proxy routing
@@ -342,6 +407,8 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         if (!s.remoteLwsUrl || (s.remoteLwsUrl as string).startsWith('http')) {
           s.remoteLwsUrl = '/lws';
         }
+        // v7→v8: add lastActiveWalletId for multi-wallet
+        if (s.lastActiveWalletId === undefined) s.lastActiveWalletId = null;
         return s;
       },
     }
