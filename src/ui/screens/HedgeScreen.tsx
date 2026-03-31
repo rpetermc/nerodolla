@@ -190,8 +190,11 @@ export function HedgeScreen() {
                   const xmrInCurrency = lighterMarket.markPrice / currencyMarket.markPrice;
                   const hc = hedgeStatus.hedgeCurrency;
                   const sym = hc === 'EUR' ? '€' : hc === 'GBP' ? '£' : '';
-                  const suffix = hc === 'XAU' || hc === 'XAG' ? ' oz' : '';
-                  return `${sym}${xmrInCurrency.toFixed(2)}${suffix}`;
+                  if (hc === 'XAU' || hc === 'XAG') {
+                    const grams = xmrInCurrency * 31.1035;
+                    return xmrInCurrency < 1 ? `${grams.toFixed(1)} g` : `${xmrInCurrency.toFixed(2)} oz`;
+                  }
+                  return `${sym}${xmrInCurrency.toFixed(2)}`;
                 })()}
               </span>
             </div>
@@ -201,10 +204,10 @@ export function HedgeScreen() {
               <span className="market-stat__value">${lighterMarket.markPrice.toFixed(2)}</span>
             </div>
           )}
-          {/* When bot is active show realised APY; otherwise show current funding rate */}
+          {/* When bot is active show APY; otherwise show current funding rate */}
           {botActive ? (
             <div className="market-stat market-stat--green">
-              <span className="market-stat__label">Realised APY</span>
+              <span className="market-stat__label">APY</span>
               <span className="market-stat__value">
                 {realisedApy !== null ? `${realisedApy.toFixed(1)}%` : '…'}
               </span>
@@ -293,7 +296,7 @@ export function HedgeScreen() {
                         : hedgeStatus.hedgeCurrency === 'GBP'
                           ? `£${hedgeStatus.lockedEurValue?.toFixed(2) ?? '—'}`
                           : hedgeStatus.hedgeCurrency === 'XAU' || hedgeStatus.hedgeCurrency === 'XAG'
-                            ? `${(hedgeStatus.eurPosition?.size ?? 0).toFixed(4)} oz ($${hedgeStatus.lockedUsdValue?.toFixed(2) ?? '—'})`
+                            ? `${(() => { const sz = hedgeStatus.eurPosition?.size ?? 0; return sz < 1 ? `${(sz * 31.1035).toFixed(1)} g` : `${sz.toFixed(2)} oz`; })()} ($${hedgeStatus.lockedUsdValue?.toFixed(2) ?? '—'})`
                             : `$${hedgeStatus.lockedUsdValue?.toFixed(2) ?? '—'}`}
                     </span>
                   </div>
@@ -366,6 +369,9 @@ export function HedgeScreen() {
                   xmrBalance={xmrBalance}
                   hedgePosition={hedgeStatus?.position}
                   lighterUsdc={hedgeStatus?.lighterUsdc}
+                  hedgeCurrency={hedgeStatus?.hedgeCurrency}
+                  currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
+                  currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
                   onActiveChange={setBotActive}
                   onApyChange={setRealisedApy}
                 />
@@ -391,6 +397,9 @@ export function HedgeScreen() {
               <BotToggle
                 xmrBalance={xmrBalance}
                 lighterUsdc={hedgeStatus?.lighterUsdc}
+                hedgeCurrency={hedgeStatus?.hedgeCurrency}
+                currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
+                currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
                 onActiveChange={setBotActive}
                 onApyChange={setRealisedApy}
               />

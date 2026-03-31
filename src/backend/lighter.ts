@@ -678,29 +678,29 @@ export async function reRegisterZkKey(
 }
 
 export interface BotEarnings {
-  spread1d: number;
-  spread7d: number;
-  spread30d: number;
-  spreadTotal: number;
-  funding1d: number;
-  funding7d: number;
-  funding30d: number;
-  fundingTotal: number;
-  firstFillAt: number; // Unix seconds of first recorded fill (0 = no fills yet)
+  pnl1d: number;
+  pnl7d: number;
+  pnl30d: number;
+  pnlTotal: number;
+  firstSnapshotAt: number; // Unix seconds of first account value snapshot (0 = none)
 }
 
 export async function getBotEarnings(): Promise<BotEarnings> {
   const res = await proxyFetch<{
-    spread_1d: number; spread_7d: number; spread_30d: number; spread_total: number;
-    funding_1d: number; funding_7d: number; funding_30d: number; funding_total: number;
-    first_fill_at: number;
+    pnl_1d?: number; pnl_7d?: number; pnl_30d?: number; pnl_total?: number;
+    first_snapshot_at?: number;
+    // Legacy format fallback (production proxy)
+    spread_1d?: number; spread_7d?: number; spread_30d?: number; spread_total?: number;
+    funding_1d?: number; funding_7d?: number; funding_30d?: number; funding_total?: number;
+    first_fill_at?: number;
   }>('/bot/earnings');
+  // Support both new (pnl) and old (spread+funding) response formats
   return {
-    spread1d: res.spread_1d, spread7d: res.spread_7d,
-    spread30d: res.spread_30d, spreadTotal: res.spread_total,
-    funding1d: res.funding_1d, funding7d: res.funding_7d,
-    funding30d: res.funding_30d, fundingTotal: res.funding_total,
-    firstFillAt: res.first_fill_at,
+    pnl1d: res.pnl_1d ?? ((res.spread_1d ?? 0) + (res.funding_1d ?? 0)),
+    pnl7d: res.pnl_7d ?? ((res.spread_7d ?? 0) + (res.funding_7d ?? 0)),
+    pnl30d: res.pnl_30d ?? ((res.spread_30d ?? 0) + (res.funding_30d ?? 0)),
+    pnlTotal: res.pnl_total ?? ((res.spread_total ?? 0) + (res.funding_total ?? 0)),
+    firstSnapshotAt: res.first_snapshot_at ?? res.first_fill_at ?? 0,
   };
 }
 

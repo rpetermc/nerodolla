@@ -12,60 +12,78 @@ import {
   initLighterSession, setProxySessionToken,
   migrateLegacyZkKey, reRegisterZkKey,
 } from '../../backend/lighter';
-import type { BotStatus, BotEarnings, LighterPosition } from '../../backend/lighter';
+import type { BotStatus, BotEarnings, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 import { loadZkKey, saveZkKey, clearZkKey } from '../../wallet/keystore';
 
 interface BotToggleProps {
   xmrBalance: number;
   hedgePosition?: LighterPosition;
   lighterUsdc?: number;
+  hedgeCurrency?: HedgeCurrency;
+  currencyMarkPrice?: number; // current USD price of hedge currency (e.g. XAU/USD)
+  currencyEntryPrice?: number; // USD price of hedge currency at hedge open
   onActiveChange?: (active: boolean) => void;
   onApyChange?: (apy: number | null) => void;
 }
 
-function fmt(n: number, decimals = 2): string {
-  return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(decimals);
+const TROY_OZ_TO_GRAMS = 31.1035;
+
+/** Format a metal amount: grams below 1 oz, ounces at/above 1 oz. */
+function fmtMetal(n: number, sign: string): string {
+  const abs = Math.abs(n);
+  if (abs < 1) {
+    const grams = abs * TROY_OZ_TO_GRAMS;
+    // Adaptive precision: show enough digits to be meaningful
+    const dp = grams >= 1 ? 1 : grams >= 0.1 ? 2 : 3;
+    return `${sign}${grams.toFixed(dp)} g`;
+  }
+  return `${sign}${abs.toFixed(2)} oz`;
 }
 
-function EarningsTable({ earnings }: { earnings: BotEarnings }) {
-  const rows: Array<{ label: string; spread: number; funding: number }> = [
-    { label: '24h',   spread: earnings.spread1d,    funding: earnings.funding1d },
-    { label: '7d',    spread: earnings.spread7d,    funding: earnings.funding7d },
-    { label: '30d',   spread: earnings.spread30d,   funding: earnings.funding30d },
-    { label: 'Total', spread: earnings.spreadTotal, funding: earnings.fundingTotal },
+/** Format a value in the hedge currency with the appropriate symbol/suffix. */
+function fmtCurrency(n: number, currency: HedgeCurrency, decimals = 2): string {
+  const sign = n >= 0 ? '+' : '-';
+  if (currency === 'XAU' || currency === 'XAG') return fmtMetal(n, sign);
+  const sym = currency === 'EUR' ? '€' : currency === 'GBP' ? '£' : '$';
+  return `${sign}${sym}${Math.abs(n).toFixed(decimals)}`;
+}
+
+function EarningsTable({ earnings, hedgeCurrency, currencyMarkPrice }: {
+  earnings: BotEarnings;
+  hedgeCurrency: HedgeCurrency;
+  currencyMarkPrice: number; // 1 for USD, XAU/USD price for gold, etc.
+}) {
+  const safeMarkPrice = currencyMarkPrice != null && currencyMarkPrice > 0 ? currencyMarkPrice : 1;
+  const conv = hedgeCurrency === 'USD' ? 1 : 1 / safeMarkPrice;
+  const cols = [
+    { label: '24h',   pnl: earnings.pnl1d * conv },
+    { label: '7d',    pnl: earnings.pnl7d * conv },
+    { label: '30d',   pnl: earnings.pnl30d * conv },
+    { label: 'Total', pnl: earnings.pnlTotal * conv },
   ];
 
   return (
-    <div className="bot-earnings">
-      <div className="bot-earnings__header">
-        <span />
-        <span>Spread</span>
-        <span>Funding</span>
-        <span>Total</span>
+    <div className="bot-pnl">
+      <div className="bot-pnl__header">
+        <span className="bot-pnl__label">PnL</span>
+        {cols.map(({ label }) => (
+          <span key={label} className="bot-pnl__col-header">{label}</span>
+        ))}
       </div>
-      {rows.map(({ label, spread, funding }) => {
-        const total = spread + funding;
-        return (
-          <div key={label} className="bot-earnings__row">
-            <span className="bot-earnings__period">{label}</span>
-            <span style={{ color: spread >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
-              {fmt(spread, 2)}
-            </span>
-            <span style={{ color: funding >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
-              {fmt(funding, 2)}
-            </span>
-            <span className="bot-earnings__total"
-              style={{ color: total >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
-              {fmt(total, 2)}
-            </span>
-          </div>
-        );
-      })}
+      <div className="bot-pnl__values">
+        <span />
+        {cols.map(({ label, pnl }) => (
+          <span key={label} className="bot-pnl__value"
+            style={{ color: pnl >= 0 ? 'var(--color-green)' : 'var(--color-red)', fontWeight: label === 'Total' ? 700 : 400 }}>
+            {fmtCurrency(pnl, hedgeCurrency)}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
 
-export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChange, onApyChange }: BotToggleProps) {
+export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrency = 'USD', currencyMarkPrice = 1, currencyEntryPrice, onActiveChange, onApyChange }: BotToggleProps) {
   const { xmrKeys, ethWallet, sessionToken, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
   const botActiveKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
 
@@ -120,15 +138,15 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
       const markPrice = lighterMarket?.markPrice ?? 0;
       const fundingApy = lighterMarket?.annualizedFundingPct
         ?? hedgePosition?.annualizedFundingPct ?? null;
-      const daysActive = e.firstFillAt > 0
-        ? (Date.now() / 1000 - e.firstFillAt) / 86400
+      const daysActive = e.firstSnapshotAt > 0
+        ? (Date.now() / 1000 - e.firstSnapshotAt) / 86400
         : 0;
 
-      // Show funding rate as baseline until we have 1+ day of spread data
+      // Show funding rate as baseline until we have 1+ day of snapshot data
       if (daysActive < 1 || markPrice <= 0) {
         onApyChange?.(fundingApy);
       } else {
-        const totalEarned = e.spreadTotal + e.fundingTotal;
+        const totalEarned = e.pnlTotal;
 
         // Use proxy-provided initial capital when available (most accurate),
         // otherwise fall back to entry-price-based calculation.
@@ -141,7 +159,12 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
         }
 
         if (capitalBase > 0) {
-          const apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
+          let apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
+          // Adjust APY for hedge currency movement: if hedged into XAU and gold
+          // appreciated vs USD, the USD-denominated APY overstates the gold return.
+          if (hedgeCurrency !== 'USD' && currencyEntryPrice && currencyEntryPrice > 0 && currencyMarkPrice > 0) {
+            apy *= currencyEntryPrice / currencyMarkPrice;
+          }
           onApyChange?.(apy);
         }
       }
@@ -356,18 +379,8 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, onActiveChan
             </div>
           )}
 
-          {/* Unrealized PnL */}
-          {hedgePosition && (
-            <div className="bot-toggle__stat-row">
-              <span>Unrealized PnL</span>
-              <span style={{ color: (hedgePosition.unrealizedPnl ?? 0) >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
-                {fmt(hedgePosition.unrealizedPnl ?? 0, 2)}
-              </span>
-            </div>
-          )}
-
-          {/* Earnings table */}
-          {earnings && <EarningsTable earnings={earnings} />}
+          {/* PnL row */}
+          {earnings && <EarningsTable earnings={earnings} hedgeCurrency={hedgeCurrency} currencyMarkPrice={hedgeCurrency === 'USD' ? 1 : currencyMarkPrice} />}
           {!earnings && (
             <div className="bot-toggle__earnings-loading">Loading earnings…</div>
           )}

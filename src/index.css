@@ -942,6 +942,37 @@ body {
 
 .swap-screen__info a { color: var(--color-primary); }
 
+.swap-screen__providers {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.swap-screen__provider-sep {
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+.swap-screen__wagyu-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.swap-screen__wagyu-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: contain;
+}
+
 .swap-screen__fee-note {
   margin-top: 6px;
   font-size: 12px;
@@ -1183,13 +1214,13 @@ body {
 .bot-toggle__target { color: var(--color-text-muted); font-weight: 400; font-size: 12px; }
 .bot-toggle__earnings-loading { font-size: 12px; color: var(--color-text-muted); padding: 6px 0; }
 
-/* ── Bot earnings table ─────────────────────────────────────────────────── */
-.bot-earnings { margin-top: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
-.bot-earnings__header { display: grid; grid-template-columns: 40px 1fr 1fr 1fr; padding: 5px 10px; background: var(--color-bg); font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; text-align: right; }
-.bot-earnings__header span:first-child { text-align: left; }
-.bot-earnings__row { display: grid; grid-template-columns: 40px 1fr 1fr 1fr; padding: 6px 10px; font-size: 13px; text-align: right; border-top: 1px solid var(--color-border); }
-.bot-earnings__period { text-align: left; color: var(--color-text-muted); font-size: 12px; }
-.bot-earnings__total { font-weight: 700; }
+/* ── Bot PnL compact row ───────────────────────────────────────────────── */
+.bot-pnl { margin-top: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
+.bot-pnl__header, .bot-pnl__values { display: grid; grid-template-columns: 32px repeat(4, 1fr); padding: 4px 10px; text-align: right; }
+.bot-pnl__header { background: var(--color-bg); font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.bot-pnl__label { text-align: left; }
+.bot-pnl__values { font-size: 13px; border-top: 1px solid var(--color-border); }
+.bot-pnl__value { white-space: nowrap; }
 
 /* ── Active hedge position panel (HedgeScreen) ─────────────────────────────── */
 .hedge-screen__active-pos { display: flex; flex-direction: column; gap: 6px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px; }
