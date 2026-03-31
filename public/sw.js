@@ -1,5 +1,5 @@
 // Nerodolla service worker — network-first for HTML, cache-first for hashed assets
-const CACHE = 'nerohedge-v6';
+const CACHE = 'nerohedge-v8';
 
 self.addEventListener('install', e => {
   // Skip waiting so new SW activates immediately

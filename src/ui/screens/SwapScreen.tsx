@@ -14,15 +14,21 @@ export function SwapScreen() {
       </div>
 
       <div className="swap-screen__info">
-        <p>
-          Swap BTC, ETH, SOL and other coins directly into XMR. Powered by{' '}
-          <a href="https://wagyu.xyz" target="_blank" rel="noopener noreferrer">
-            wagyu.xyz
+        <div className="swap-screen__providers">
+          <a href="https://wagyu.xyz" target="_blank" rel="noopener noreferrer" className="swap-screen__wagyu-badge">
+            <img src="/wagyu-logo.avif" alt="wagyu.xyz" className="swap-screen__wagyu-logo" />
+            <span>wagyu.xyz</span>
           </a>
-          .
+          <span className="swap-screen__provider-sep">+</span>
+          <a href="https://trocador.app" target="_blank" rel="noopener noreferrer" className="swap-screen__wagyu-badge">
+            <span>trocador.app</span>
+          </a>
+        </div>
+        <p>
+          Swap BTC, ETH, SOL and other coins directly into XMR. Best rate auto-selected from multiple providers. No exchange account, no KYC.
         </p>
         <div className="swap-screen__fee-note">
-          NeroHedge fee: 0.0% · wagyu protocol fee: ~0.1%
+          NeroHedge fee: 0% · provider fees shown in quote
         </div>
       </div>
 

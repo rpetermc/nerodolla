@@ -93,7 +93,7 @@ const CURRENCY_LABELS: Record<string, string> = {
   USD: '$ USD', EUR: '€ EUR', GBP: '£ GBP', XAU: 'Au GOLD', XAG: 'Ag SILVER',
 };
 const CURRENCY_SYMBOLS: Record<string, string> = {
-  USD: '$', EUR: '€', GBP: '£', XAU: 'oz', XAG: 'oz',
+  USD: '$', EUR: '€', GBP: '£', XAU: 'g', XAG: 'g',
 };
 
 /**
@@ -828,8 +828,18 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   }
 
   if (step === 'slider') {
-    const currencyLockValue = currency !== 'USD' && currencyRate && quote
-      ? (Number(quote.minReceived) / currencyRate).toFixed(2)
+    const currencyLockOz = currency !== 'USD' && currencyRate && quote
+      ? Number(quote.minReceived) / currencyRate
+      : null;
+    const currencyLockValue = currencyLockOz !== null
+      ? (currency === 'XAU' || currency === 'XAG')
+        ? currencyLockOz < 1
+          ? `${(currencyLockOz * 31.1035).toFixed(1)}`
+          : `${currencyLockOz.toFixed(2)}`
+        : currencyLockOz.toFixed(2)
+      : null;
+    const currencyLockUnit = (currency === 'XAU' || currency === 'XAG') && currencyLockOz !== null
+      ? currencyLockOz < 1 ? 'g' : 'oz'
       : null;
     const warnThreshold = currency === 'USD' ? 15 : 20;
     return (
@@ -877,7 +887,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             {xmrFromPct.toFixed(4)} XMR
             {quote
               ? <> → <strong>{quote.minReceived} USDC</strong> min
-                  {currencyLockValue && <> ≈ <strong>{CURRENCY_SYMBOLS[currency]}{currencyLockValue}</strong> locked</>}
+                  {currencyLockValue && <> ≈ <strong>{currencyLockUnit ? `${currencyLockValue} ${currencyLockUnit}` : `${CURRENCY_SYMBOLS[currency]}${currencyLockValue}`}</strong> locked</>}
                 </>
               : <> — fetching quote…</>}
           </div>

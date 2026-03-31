@@ -15,7 +15,7 @@ import { persist } from 'zustand/middleware';
 import type { XmrKeys } from '../wallet/xmr';
 import type { EthWallet } from '../wallet/eth';
 import type { LwsAddressInfo, LwsTransaction } from '../backend/lws';
-import type { WagyuOrder } from '../backend/wagyu';
+import type { SwapOrder } from '../backend/swapProvider';
 import type { HedgeStatus, LighterMarketInfo } from '../backend/lighter';
 import type { SyncProgress } from '../backend/wasm-wallet';
 import type { SignClientTypes, SessionTypes } from '@walletconnect/types';
@@ -32,17 +32,17 @@ function swapKey(walletId?: string | null): string {
   return walletId ? `${SWAP_PERSIST_PREFIX}_${walletId}` : SWAP_PERSIST_PREFIX;
 }
 
-function saveSwapState(orders: WagyuOrder[], walletId?: string | null) {
+function saveSwapState(orders: SwapOrder[], walletId?: string | null) {
   try {
     localStorage.setItem(swapKey(walletId), JSON.stringify({ orders, savedAt: Date.now() }));
   } catch { /* ignore */ }
 }
 
-function loadSwapState(walletId?: string | null): { swapOrders: WagyuOrder[]; swapStep: SwapStep } | null {
+function loadSwapState(walletId?: string | null): { swapOrders: SwapOrder[]; swapStep: SwapStep } | null {
   try {
     const raw = localStorage.getItem(swapKey(walletId));
     if (!raw) return null;
-    const { orders, savedAt } = JSON.parse(raw) as { orders: WagyuOrder[]; savedAt: number };
+    const { orders, savedAt } = JSON.parse(raw) as { orders: SwapOrder[]; savedAt: number };
     if (!orders?.length || Date.now() - savedAt > SWAP_PERSIST_TTL) {
       localStorage.removeItem(swapKey(walletId));
       return null;
@@ -139,7 +139,7 @@ export interface WalletState {
   // ── Swap state ──
   swapStep: SwapStep;
   // swapOrders[0] = main USDC order; swapOrders[1] = ETH gas order (first swap only)
-  swapOrders: WagyuOrder[];
+  swapOrders: SwapOrder[];
   swapError: string | null;
 
   // ── WASM sync progress ──
@@ -189,7 +189,7 @@ export interface WalletActions {
 
   // Swap
   setSwapStep: (step: SwapStep) => void;
-  setSwapOrders: (orders: WagyuOrder[]) => void;
+  setSwapOrders: (orders: SwapOrder[]) => void;
   setSwapError: (err: string | null) => void;
   clearSwap: () => void;
 

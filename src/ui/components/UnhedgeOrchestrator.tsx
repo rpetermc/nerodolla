@@ -11,10 +11,21 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWalletStore } from '../../store/wallet';
 import { closeHedgeAndWithdraw, withdrawUsdc, relayUsdcTransfer, getRelayTaskStatus, stopBot, fetchEthUsdcBalanceProxy } from '../../backend/lighter';
-import { getReverseQuote, createReverseOrder, getOrder } from '../../backend/wagyu';
-import type { WagyuQuote, WagyuOrderDetail } from '../../backend/wagyu';
+import { SWAP_TOKENS, XMR_TOKEN, ETHEREUM_CHAIN_ID, USDC_ETH_ADDRESS } from '../../backend/wagyu';
+import {
+  getBestQuote,
+  createOrder as providerCreateOrder,
+  pollSwapOrder,
+  type SwapQuote,
+  type SwapOrder,
+  type SwapProvider,
+} from '../../backend/swapProvider';
 import { signTransferAuthorization } from '../../wallet/eth';
 import { createSubaddress } from '../../backend/lws';
+
+const USDC_ETH_TOKEN = SWAP_TOKENS.find(
+  (t) => t.chainId === ETHEREUM_CHAIN_ID && t.tokenId === USDC_ETH_ADDRESS,
+)!;
 
 type UnhedgeStep =
   | 'idle' | 'quoting' | 'confirming'
@@ -27,9 +38,10 @@ interface UnhedgePersist {
   step: 'awaiting_usdc' | 'swapping' | 'bridging';
   xmrAddr: string;
   balanceBefore: number;
-  // wagyu order details — only set once USDC lands on ETH mainnet
-  wagOrderId?: string;
-  wagDepositAddr?: string;
+  // swap order details — only set once USDC lands on ETH mainnet
+  provider?: SwapProvider;
+  orderId?: string;
+  depositAddr?: string;
   relayTaskId?: string;
   relayChain?: 'arbitrum' | 'ethereum'; // which chain the relay tx is on
   withdrawInitiatedAt?: number; // unix ms — when the Lighter withdrawal was first sent
@@ -75,8 +87,8 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
   const { ethWallet, xmrKeys, hedgeStatus } = useWalletStore();
 
   const [step, setStep]                 = useState<UnhedgeStep>('idle');
-  const [quote, setQuote]               = useState<WagyuQuote | null>(null);
-  const [bridgeDetail, setBridgeDetail] = useState<WagyuOrderDetail | null>(null);
+  const [quote, setQuote]               = useState<SwapQuote | null>(null);
+  const [bridgeDetail, setBridgeDetail] = useState<SwapOrder | null>(null);
   const [errorMsg, setErrorMsg]         = useState<string | null>(null);
   const [elapsedMin, setElapsedMin]     = useState(0);
 
@@ -84,8 +96,9 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
   const tickerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const withdrawAtRef  = useRef<number>(0); // ms timestamp when withdrawal was initiated
   const xmrAddrRef     = useRef<string | null>(null);
-  const wagOrderRef    = useRef<string | null>(null);
-  const wagDepRef      = useRef<string | null>(null);
+  const orderIdRef     = useRef<string | null>(null);
+  const depositAddrRef = useRef<string | null>(null);
+  const providerRef    = useRef<SwapProvider | null>(null);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -106,9 +119,10 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
     const saved = loadPersist();
     if (!saved) return;
 
-    wagOrderRef.current = saved.wagOrderId ?? null;
-    wagDepRef.current   = saved.wagDepositAddr ?? null;
-    xmrAddrRef.current  = saved.xmrAddr;
+    orderIdRef.current     = saved.orderId ?? null;
+    depositAddrRef.current = saved.depositAddr ?? null;
+    providerRef.current    = saved.provider ?? null;
+    xmrAddrRef.current     = saved.xmrAddr;
     setStep(saved.step);
 
     if (saved.step === 'awaiting_usdc') {
@@ -119,31 +133,30 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
     } else if (saved.step === 'swapping') {
       if (saved.relayTaskId) {
         // Relay was submitted — poll the tx
-        pollRelayTask(saved.relayTaskId, saved.wagOrderId!, saved.relayChain ?? 'ethereum');
-      } else if (saved.wagDepositAddr && saved.wagOrderId) {
-        // App locked between wagyu order creation and relay submission.
-        // wagyu order was just created so it's still within the 30min window.
+        pollRelayTask(saved.relayTaskId, saved.orderId!, saved.provider ?? 'wagyu', saved.relayChain ?? 'ethereum');
+      } else if (saved.depositAddr && saved.orderId) {
+        // App locked between order creation and relay submission.
         fetchEthUsdcBalanceProxy(ethWallet.address).then(balance => {
           if (balance > 0.01) {
             // USDC still there — re-sign and relay to the existing order
             const valueMicro = BigInt(Math.floor(balance * 1e6));
-            signAndRelay(saved.wagDepositAddr!, valueMicro, saved.wagOrderId!);
+            signAndRelay(saved.depositAddr!, valueMicro, saved.orderId!, saved.provider ?? 'wagyu');
           } else {
             // USDC already sent — assume relay succeeded, jump to bridge polling
             setStep('bridging');
             savePersist({ ...saved, step: 'bridging' });
-            startBridgePolling(saved.wagOrderId!);
+            startBridgePolling(saved.orderId!, saved.provider ?? 'wagyu');
           }
         }).catch(() => {
-          // Can't determine — restart polling (will create a fresh wagyu order on arrival)
+          // Can't determine — restart polling
           startUsdcPolling(0, saved.xmrAddr);
         });
       } else {
-        // No wagyu order yet — restart polling
+        // No order yet — restart polling
         startUsdcPolling(0, saved.xmrAddr);
       }
     } else if (saved.step === 'bridging') {
-      startBridgePolling(saved.wagOrderId!);
+      startBridgePolling(saved.orderId!, saved.provider ?? 'wagyu');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ethWallet?.address]);
@@ -162,7 +175,8 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
     if (!recoveryMode && ethUsdcRecovery == null && !hedgeStatus?.isHedged) return;
     setStep('quoting');
     try {
-      const q = await getReverseQuote(usdcMicro.toString());
+      const humanUsdc = usdcCollateral.toFixed(2);
+      const q = await getBestQuote(USDC_ETH_TOKEN, XMR_TOKEN, humanUsdc);
       setQuote(q);
       setStep('confirming');
     } catch (err) {
@@ -184,20 +198,24 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
       xmrAddrRef.current = xmrAddr;
 
       if (ethUsdcRecovery != null) {
-        // 2a. ETH mainnet recovery: USDC already on Ethereum mainnet — create wagyu order
+        // 2a. ETH mainnet recovery: USDC already on Ethereum mainnet — get best rate
         // and relay immediately. Use ethUsdcRecovery prop directly (already fetched via proxy).
+        const humanUsdc = ethUsdcRecovery.toFixed(2);
+        const freshQuote = await getBestQuote(USDC_ETH_TOKEN, XMR_TOKEN, humanUsdc);
+        const order = await providerCreateOrder(freshQuote, USDC_ETH_TOKEN, XMR_TOKEN, xmrAddr, ethWallet.address);
+        orderIdRef.current     = order.orderId;
+        depositAddrRef.current = order.depositAddress;
+        providerRef.current    = order.provider;
         const valueMicro = BigInt(Math.floor(ethUsdcRecovery * 1e6));
-        const order = await createReverseOrder(valueMicro.toString(), xmrAddr);
-        wagOrderRef.current = order.orderId;
-        wagDepRef.current   = order.depositAddress;
         savePersist({
           step: 'swapping',
           xmrAddr,
           balanceBefore: ethUsdcRecovery,
-          wagOrderId:     order.orderId,
-          wagDepositAddr: order.depositAddress,
+          provider:    order.provider,
+          orderId:     order.orderId,
+          depositAddr: order.depositAddress,
         });
-        await signAndRelay(order.depositAddress, valueMicro, order.orderId);
+        await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
       } else if (recoveryMode) {
         // 2b. Position already closed — just withdraw whatever is left in Lighter.
         // Wagyu order created later, when USDC actually lands on ETH mainnet.
@@ -281,15 +299,18 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         if (balance > balanceBefore + 0.01) {
           clearInterval(pollRef.current!);
           pollRef.current = null;
-          // Create wagyu order now — fresh 30-min window, rate reflects current market
-          const valueMicro = BigInt(Math.floor(balance * 1e6));
-          const order = await createReverseOrder(valueMicro.toString(), xmrAddr);
-          wagOrderRef.current = order.orderId;
-          wagDepRef.current   = order.depositAddress;
-          // Persist wagyu details so resume works if app locks between here and relay
+          // Get best rate now — fresh quote, rate reflects current market
+          const humanUsdc = balance.toFixed(2);
+          const freshQuote = await getBestQuote(USDC_ETH_TOKEN, XMR_TOKEN, humanUsdc);
+          const order = await providerCreateOrder(freshQuote, USDC_ETH_TOKEN, XMR_TOKEN, xmrAddr, ethWallet!.address);
+          orderIdRef.current     = order.orderId;
+          depositAddrRef.current = order.depositAddress;
+          providerRef.current    = order.provider;
+          // Persist order details so resume works if app locks between here and relay
           const saved = loadPersist();
-          if (saved) savePersist({ ...saved, wagOrderId: order.orderId, wagDepositAddr: order.depositAddress });
-          await signAndRelay(order.depositAddress, valueMicro, order.orderId);
+          if (saved) savePersist({ ...saved, provider: order.provider, orderId: order.orderId, depositAddr: order.depositAddress });
+          const valueMicro = BigInt(Math.floor(balance * 1e6));
+          await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
         }
       } catch (e) {
         console.warn('startUsdcPolling: fetch error', e instanceof Error ? e.message : e);
@@ -299,7 +320,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
 
   // ── Sign EIP-3009 + relay via proxy wallet ───────────────────────────────────
 
-  async function signAndRelay(depositAddr: string, valueMicro: bigint, orderId: string) {
+  async function signAndRelay(depositAddr: string, valueMicro: bigint, orderId: string, provider: SwapProvider) {
     if (!ethWallet) return;
     setStep('swapping');
     // Update persist: we're now in swapping but don't have a relay task ID yet
@@ -314,7 +335,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
       const saved = loadPersist();
       if (saved) savePersist({ ...saved, step: 'swapping', relayTaskId: taskId, relayChain: 'ethereum' });
 
-      await pollRelayTask(taskId, orderId, 'ethereum');
+      await pollRelayTask(taskId, orderId, provider, 'ethereum');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Relay failed');
       setStep('error');
@@ -323,7 +344,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
 
   // ── Poll relay tx until confirmed ────────────────────────────────────────────
 
-  async function pollRelayTask(taskId: string, orderId: string, chain: 'arbitrum' | 'ethereum' = 'ethereum') {
+  async function pollRelayTask(taskId: string, orderId: string, provider: SwapProvider, chain: 'arbitrum' | 'ethereum' = 'ethereum') {
     const MAX_POLLS = 60; // 5 min @ 5s
     let polls = 0;
     if (pollRef.current) clearInterval(pollRef.current);
@@ -331,7 +352,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
       polls++;
       if (polls > MAX_POLLS) {
         clearInterval(pollRef.current!);
-        setErrorMsg('Relay timed out — USDC may still arrive; check wagyu.xyz');
+        setErrorMsg('Relay timed out — USDC may still arrive');
         setStep('error');
         return;
       }
@@ -343,7 +364,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           const saved = loadPersist();
           if (saved) savePersist({ ...saved, step: 'bridging' });
           setStep('bridging');
-          startBridgePolling(orderId);
+          startBridgePolling(orderId, provider);
         } else if (status.taskState === 'ExecReverted' || status.taskState === 'Cancelled') {
           clearInterval(pollRef.current!);
           setErrorMsg(`Relay failed (${status.taskState}): ${status.error ?? ''}`);
@@ -355,45 +376,53 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
 
   // ── Poll wagyu order until XMR delivered ─────────────────────────────────────
 
-  function startBridgePolling(orderId: string) {
+  function startBridgePolling(orderId: string, provider: SwapProvider) {
     const MAX_POLLS = 120; // 20 min @ 10s
     let polls = 0;
     if (pollRef.current) clearInterval(pollRef.current);
+
+    // Build a minimal SwapOrder for pollSwapOrder (only needs provider + orderId)
+    const orderStub: SwapOrder = {
+      provider,
+      orderId,
+      depositAddress: '',
+      depositAmount: '',
+      depositAmountFormatted: '',
+      expectedOutput: '',
+      expectedOutputUsd: '',
+      status: 'swapping',
+    };
 
     const tick = async () => {
       polls++;
       if (polls > MAX_POLLS) {
         if (pollRef.current) clearInterval(pollRef.current);
-        setErrorMsg('wagyu bridge timed out — XMR may still arrive; check wagyu.xyz');
+        setErrorMsg('Bridge timed out — XMR may still arrive');
         setStep('error');
         return;
       }
       try {
-        const detail = await getOrder(orderId);
+        const detail = await pollSwapOrder(orderStub);
         setBridgeDetail(detail);
         if (detail.status === 'complete') {
           if (pollRef.current) clearInterval(pollRef.current);
           clearPersist();
           setStep('complete');
-          // Don't call onUnhedged() here — let the Done button do it to avoid
-          // a parent re-render racing with the complete step becoming visible.
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
           clearPersist();
-          setErrorMsg(`Bridge ${detail.status}${detail.errorMessage ? `: ${detail.errorMessage}` : ''}`);
+          setErrorMsg(`Bridge ${detail.status}`);
           setStep('error');
         }
       } catch (e) {
-        // Keep polling, but surface repeated failures after 5 consecutive errors
         const err = e instanceof Error ? e.message : String(e);
-        console.warn('startBridgePolling: getOrder error', err);
+        console.warn('startBridgePolling: poll error', err);
       }
     };
 
-    // Fire immediately so resume after app-kill shows completion without a 10s wait,
-    // then continue polling every 10s until complete/terminal.
     tick();
-    pollRef.current = setInterval(tick, 10_000);
+    const intervalMs = provider === 'trocador' ? 60_000 : 10_000;
+    pollRef.current = setInterval(tick, intervalMs);
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
@@ -438,6 +467,9 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
 
   if (step === 'confirming') {
     const xmrOut = quote ? parseFloat(quote.minReceived).toFixed(4) : '—';
+    const providerLabel = quote?.provider === 'trocador'
+      ? `Trocador${quote.providerDetail ? ` ${quote.providerDetail}` : ''}`
+      : 'wagyu.xyz';
     return (
       <div className="hedge-orch">
         <div className="hedge-orch__review">
@@ -464,16 +496,22 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
             <span style={{ color: 'var(--color-green)' }}>~{xmrOut} XMR</span>
           </div>
           <div className="hedge-orch__review-row">
-            <span>Bridge</span>
-            <span>wagyu.xyz (USDC → XMR)</span>
+            <span>Provider</span>
+            <span>{providerLabel} (USDC → XMR)</span>
           </div>
+          {quote && !isNaN(quote.effectiveCostPct) && (
+            <div className="hedge-orch__review-row">
+              <span>Effective cost</span>
+              <span>{quote.effectiveCostPct.toFixed(1)}%</span>
+            </div>
+          )}
         </div>
         <p className="hedge-orch__progress">
           {ethUsdcRecovery != null
-            ? 'USDC will be relayed from Ethereum mainnet to wagyu and swapped to XMR. No ETH gas required — the proxy wallet pays gas on your behalf.'
+            ? `USDC will be relayed from Ethereum mainnet to ${providerLabel} and swapped to XMR. No ETH gas required — the proxy wallet pays gas on your behalf.`
             : recoveryMode
-              ? 'USDC will be withdrawn from Lighter, then swapped to XMR via wagyu. No ETH gas required.'
-              : 'USDC will be withdrawn from Lighter (1–4h), then swapped to XMR via wagyu. The swap rate is locked when USDC arrives. No ETH gas required — the proxy wallet pays Ethereum mainnet gas on your behalf.'}
+              ? `USDC will be withdrawn from Lighter, then swapped to XMR via ${providerLabel}. No ETH gas required.`
+              : `USDC will be withdrawn from Lighter (1–4h), then swapped to XMR. Best rate auto-selected when USDC arrives. No ETH gas required — the proxy wallet pays Ethereum mainnet gas on your behalf.`}
         </p>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn btn--danger" onClick={handleConfirm}>
@@ -563,10 +601,11 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
             // rather than dumping the user on a confusing empty screen.
             const saved = loadPersist();
             if (saved?.withdrawInitiatedAt) {
-              // Reset any stale wagyu order details and resume polling
-              wagOrderRef.current = null;
-              wagDepRef.current   = null;
-              savePersist({ ...saved, wagOrderId: undefined, wagDepositAddr: undefined });
+              // Reset any stale order details and resume polling
+              orderIdRef.current     = null;
+              depositAddrRef.current = null;
+              providerRef.current    = null;
+              savePersist({ ...saved, orderId: undefined, depositAddr: undefined, provider: undefined });
               startUsdcPolling(saved.balanceBefore, saved.xmrAddr);
               // Stay in awaiting_usdc — nothing to do
             } else {
@@ -585,14 +624,14 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
     return (
       <div className="hedge-orch__spinner-row">
         <div className="swap-flow__spinner" style={{ margin: 0, width: 20, height: 20, borderWidth: 2 }} />
-        <span>Sending USDC to wagyu…</span>
+        <span>Sending USDC to swap provider…</span>
       </div>
     );
   }
 
   if (step === 'bridging') {
-    let label = 'Swapping USDC → XMR via wagyu…';
-    if (bridgeDetail?.status === 'confirming') {
+    let label = 'Swapping USDC → XMR…';
+    if (bridgeDetail?.status === 'confirming' && bridgeDetail.confirmations != null && bridgeDetail.requiredConfirmations != null) {
       label = `Confirming: ${bridgeDetail.confirmations}/${bridgeDetail.requiredConfirmations}`;
     }
     return (

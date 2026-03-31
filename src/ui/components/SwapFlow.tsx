@@ -1,20 +1,22 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWalletStore } from '../../store/wallet';
 import {
-  getSwapQuote,
-  createSwapOrder,
-  getOrder,
-  formatTokenAmount,
   groupByChain,
   tokenKey,
   findToken,
   SWAP_TOKENS,
   XMR_TOKEN,
   MONERO_CHAIN_ID,
-  type SwapToken,
-  type WagyuQuote,
-  type WagyuOrderDetail,
 } from '../../backend/wagyu';
+import {
+  getBestQuote,
+  createOrder as createSwapOrder,
+  pollSwapOrder,
+  formatTokenAmount,
+  type SwapToken,
+  type SwapQuote,
+  type SwapOrder,
+} from '../../backend/swapProvider';
 import { transferXmr, formatXmr, createSubaddress } from '../../backend/lws';
 
 // Default pair: BTC → XMR
@@ -42,8 +44,8 @@ export function SwapFlow() {
   const [toToken,   setToToken]   = useState<SwapToken>(DEFAULT_TO);
   const [fromAmount, setFromAmount] = useState('');
   const [destAddress, setDestAddress] = useState('');
-  const [quote, setQuote] = useState<WagyuQuote | null>(null);
-  const [orderDetails, setOrderDetails] = useState<WagyuOrderDetail[]>([]);
+  const [quote, setQuote] = useState<SwapQuote | null>(null);
+  const [orderDetail, setOrderDetail] = useState<SwapOrder | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -70,20 +72,13 @@ export function SwapFlow() {
     async function poll() {
       if (swapOrders.length === 0) return;
       try {
-        const details = await Promise.all(swapOrders.map((o) => getOrder(o.orderId)));
-        setOrderDetails(details);
-        const allComplete = details.every((d) => d.status === 'complete');
-        const anyTerminal = details.some(
-          (d) => d.status === 'failed' || d.status === 'refunded' || d.status === 'expired'
-        );
-        if (allComplete) {
+        const updated = await pollSwapOrder(swapOrders[0]);
+        setOrderDetail(updated);
+        if (updated.status === 'complete') {
           setSwapStep('complete');
           if (pollRef.current) clearInterval(pollRef.current);
-        } else if (anyTerminal) {
-          const failed = details.find(
-            (d) => d.status === 'failed' || d.status === 'refunded' || d.status === 'expired'
-          );
-          setSwapError(`Order ${failed?.status}: ${failed?.errorMessage ?? 'no details'}`);
+        } else if (updated.status === 'failed' || updated.status === 'refunded' || updated.status === 'expired') {
+          setSwapError(`Order ${updated.status}`);
           setSwapStep('error');
           if (pollRef.current) clearInterval(pollRef.current);
         }
@@ -91,7 +86,8 @@ export function SwapFlow() {
     }
 
     poll();
-    pollRef.current = setInterval(poll, 10_000);
+    const intervalMs = swapOrders[0]?.provider === 'trocador' ? 60_000 : 10_000;
+    pollRef.current = setInterval(poll, intervalMs);
   }, [swapStep, swapOrders, setSwapStep, setSwapError]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -111,7 +107,7 @@ export function SwapFlow() {
     setSwapError(null);
     setSwapStep('quoting');
     try {
-      const q = await getSwapQuote(fromToken, toToken, fromAmount);
+      const q = await getBestQuote(fromToken, toToken, fromAmount);
       setQuote(q);
       setSwapStep('confirm');
     } catch (err) {
@@ -131,7 +127,10 @@ export function SwapFlow() {
         ? (receiveAddress ?? xmrKeys.primaryAddress)
         : destAddress;
 
-      const order = await createSwapOrder(fromToken, toToken, fromAmount, destination);
+      // For trocador, provide a refund address (XMR primary if sending XMR, dest otherwise)
+      const refundAddr = fromIsXmr ? xmrKeys.primaryAddress : undefined;
+
+      const order = await createSwapOrder(quote, fromToken, toToken, destination, refundAddr);
       setSwapOrders([order]);
 
       if (fromToken.symbol === 'XMR') {
@@ -162,7 +161,7 @@ export function SwapFlow() {
     setFromAmount('');
     setDestAddress('');
     setQuote(null);
-    setOrderDetails([]);
+    setOrderDetail(null);
     if (pollRef.current) clearInterval(pollRef.current);
   }
 
@@ -201,7 +200,7 @@ export function SwapFlow() {
 
   const xmrDestAddr  = receiveAddress ?? xmrKeys.primaryAddress;
   const order  = swapOrders[0] ?? null;
-  const detail = orderDetails[0] ?? null;
+  const detail = orderDetail;
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -334,6 +333,10 @@ export function SwapFlow() {
           <h3 className="swap-flow__section-title">Confirm Swap</h3>
 
           <div className="quote-card">
+            <div className="quote-row quote-row--muted">
+              <span>Provider</span>
+              <span>{quote.provider === 'wagyu' ? 'wagyu.xyz' : `Trocador${quote.providerDetail ? ` ${quote.providerDetail}` : ''}`}</span>
+            </div>
             <div className="quote-row quote-row--highlight">
               <span>You send</span>
               <span className="quote-row__value">
@@ -370,7 +373,7 @@ export function SwapFlow() {
             </div>
             <div className="quote-row quote-row--muted">
               <span>Est. time</span>
-              <span>~30–60 min</span>
+              <span>~{Math.round(quote.estimatedTime / 60)} min</span>
             </div>
             {fromToken.symbol === 'XMR' && (
               <div className="quote-row quote-row--muted">
@@ -386,6 +389,12 @@ export function SwapFlow() {
               <div className="quote-row quote-row--muted">
                 <span>Integrator fee</span>
                 <span>${quote.integratorFee.feeUsd}</span>
+              </div>
+            )}
+            {!isNaN(quote.effectiveCostPct) && (
+              <div className="quote-row quote-row--muted">
+                <span>Effective cost</span>
+                <span>{quote.effectiveCostPct.toFixed(1)}%</span>
               </div>
             )}
           </div>
@@ -467,14 +476,14 @@ export function SwapFlow() {
                 'pending'
               }`} />
               <span>{fromToken.symbol === 'XMR' ? 'Monero' : fromToken.symbol} confirmations</span>
-              {detail && detail.requiredConfirmations > 0 && (
+              {detail?.confirmations != null && detail?.requiredConfirmations != null && detail.requiredConfirmations > 0 && (
                 <span className="bridge-status__count">
                   {detail.confirmations} / {detail.requiredConfirmations}
                 </span>
               )}
             </div>
 
-            {detail && detail.requiredConfirmations > 0 && (
+            {detail?.confirmations != null && detail?.requiredConfirmations != null && detail.requiredConfirmations > 0 && (
               <div className="bridge-status__progress-bar">
                 <div
                   className="bridge-status__progress-fill"
@@ -496,14 +505,6 @@ export function SwapFlow() {
               )}
             </div>
 
-            {detail?.depositTxHash && (
-              <div className="bridge-status__detail">
-                <span className="bridge-status__label">{fromToken.symbol} TX</span>
-                <span className="bridge-status__value bridge-status__value--mono">
-                  {detail.depositTxHash.slice(0, 12)}…
-                </span>
-              </div>
-            )}
           </div>
 
           <div className="bridge-status__order-id">Order: {order.orderId}</div>
@@ -518,8 +519,8 @@ export function SwapFlow() {
           <p>
             Received{' '}
             <strong>
-              {detail?.actualOutput
-                ? formatTokenAmount(detail.actualOutput, toToken)
+              {detail
+                ? formatTokenAmount(detail.expectedOutput, toToken)
                 : order
                   ? formatTokenAmount(order.expectedOutput, toToken)
                   : ''}

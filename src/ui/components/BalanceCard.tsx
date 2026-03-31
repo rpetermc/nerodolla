@@ -72,7 +72,11 @@ export function BalanceCard({ onRefresh }: BalanceCardProps) {
           <div className="balance-card__amount">
             <span className="balance-card__xmr">
               {isNonUsdHedge && totalCurrencyValue !== null
-                ? `${hedgeCurrency === 'EUR' ? '€' : hedgeCurrency === 'GBP' ? '£' : ''}${totalCurrencyValue.toFixed(hedgeCurrency === 'XAU' ? 4 : hedgeCurrency === 'XAG' ? 2 : 2)}${hedgeCurrency === 'XAU' || hedgeCurrency === 'XAG' ? ' oz' : ''}`
+                ? (hedgeCurrency === 'XAU' || hedgeCurrency === 'XAG')
+                  ? totalCurrencyValue < 1
+                    ? `${(totalCurrencyValue * 31.1035).toFixed(1)} g`
+                    : `${totalCurrencyValue.toFixed(2)} oz`
+                  : `${hedgeCurrency === 'EUR' ? '€' : hedgeCurrency === 'GBP' ? '£' : ''}${totalCurrencyValue.toFixed(2)}`
                 : (totalUsdValue !== null ? `$${totalUsdValue.toFixed(2)}` : '—')}
             </span>
             {isNonUsdHedge && totalUsdValue !== null && (
