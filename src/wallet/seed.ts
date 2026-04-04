@@ -10,6 +10,7 @@
  */
 
 import * as bip39 from 'bip39';
+import { wordlists } from 'bip39';
 
 export interface MasterSeed {
   /** Raw 64-byte BIP-39 seed (PBKDF2 of mnemonic + optional passphrase) */
@@ -17,6 +18,11 @@ export interface MasterSeed {
   /** The mnemonic phrase (12 or 24 words) */
   mnemonic: string;
 }
+
+/** All available BIP-39 wordlists for multilingual validation. */
+const ALL_WORDLISTS: string[][] = Object.values(wordlists).filter(
+  (wl): wl is string[] => Array.isArray(wl),
+);
 
 /**
  * Generate a fresh 24-word BIP-39 mnemonic and derive the master seed.
@@ -27,22 +33,34 @@ export function generateMnemonic(): string {
 }
 
 /**
- * Validate a mnemonic phrase.
+ * Validate a mnemonic phrase against all available BIP-39 wordlists.
+ * Supports English, Spanish, French, Italian, Japanese, Korean,
+ * Chinese (Simplified/Traditional), Czech, and Portuguese.
  */
 export function validateMnemonic(mnemonic: string): boolean {
-  return bip39.validateMnemonic(mnemonic.trim().toLowerCase());
+  const normalized = mnemonic.trim().toLowerCase();
+  return ALL_WORDLISTS.some(wl => bip39.validateMnemonic(normalized, wl));
+}
+
+/**
+ * Find the wordlist that matches a mnemonic, or undefined if none match.
+ */
+function findWordlist(mnemonic: string): string[] | undefined {
+  return ALL_WORDLISTS.find(wl => bip39.validateMnemonic(mnemonic, wl));
 }
 
 /**
  * Derive the master seed from a mnemonic and optional passphrase.
  * Returns 64 bytes (512 bits) from BIP-39 PBKDF2.
+ * Automatically detects the wordlist language.
  */
 export async function mnemonicToSeed(
   mnemonic: string,
   passphrase = ''
 ): Promise<MasterSeed> {
   const normalized = mnemonic.trim().toLowerCase();
-  if (!bip39.validateMnemonic(normalized)) {
+  const wl = findWordlist(normalized);
+  if (!wl) {
     throw new Error('Invalid mnemonic phrase');
   }
   const seedBuffer = await bip39.mnemonicToSeed(normalized, passphrase);

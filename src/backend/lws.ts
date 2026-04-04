@@ -83,10 +83,11 @@ async function lwsFetch<T>(
   body: unknown
 ): Promise<T> {
   const url = `${config.baseUrl.replace(/\/$/, '')}${path}`;
+  const timeoutMs = config.timeoutMs ?? 30_000;
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(),
-    config.timeoutMs ?? 15_000
+    timeoutMs,
   );
 
   try {
@@ -101,6 +102,11 @@ async function lwsFetch<T>(
       throw new Error(`LWS ${path} HTTP ${res.status}: ${text}`);
     }
     return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Wallet sync timed out — tap refresh to retry');
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
