@@ -945,30 +945,50 @@ body {
 .swap-screen__providers {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 12px;
 }
-.swap-screen__provider-sep {
+.swap-screen__powered-by {
+  font-size: 11px;
   color: var(--color-text-muted);
-  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
 }
-.swap-screen__wagyu-badge {
+.swap-screen__provider-badges {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 8px;
+  flex: 1;
+}
+.swap-screen__provider-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  padding: 8px 10px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  text-decoration: none;
-  color: var(--color-text-muted);
-  font-size: 13px;
+  color: var(--color-text);
+  font-size: 14px;
   font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
 }
-
-.swap-screen__wagyu-logo {
-  width: 36px;
-  height: 36px;
+.swap-screen__provider-badge input[type="checkbox"] {
+  accent-color: var(--color-primary);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+.swap-screen__provider-badge--off {
+  opacity: 0.4;
+}
+.swap-screen__provider-logo {
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   object-fit: contain;
 }
@@ -1208,6 +1228,17 @@ body {
 .bot-toggle__stat-row:last-child { border-bottom: none; }
 .bot-toggle__stat-row span:last-child { font-weight: 600; }
 .bot-toggle__desc { font-size: 13px; color: var(--color-text-muted); line-height: 1.5; margin: 0; }
+.bot-toggle__market-select { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.bot-toggle__market-label { font-size: 13px; color: var(--color-text-muted); }
+.bot-toggle__market-dropdown {
+  font-size: 13px; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--color-border); background: var(--color-bg);
+  color: var(--color-text); cursor: pointer;
+}
+.bot-toggle__market-warn {
+  font-size: 12px; color: var(--color-orange, #f59e0b); line-height: 1.4;
+  padding: 4px 8px; background: rgba(245, 158, 11, 0.08); border-radius: 4px;
+}
 .bot-toggle__error { font-size: 12px; color: var(--color-red); }
 .bot-toggle__cta { align-self: flex-start; }
 .bot-toggle__divider { border: none; border-top: 1px solid var(--color-border); margin: 2px 0; }

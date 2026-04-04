@@ -16,6 +16,16 @@
 
 import { ethers } from 'ethers';
 
+// Lighter market IDs for bot market selection
+export const LIGHTER_MARKET_IDS = {
+  'XMR-USD': 77,
+  'XAU-USD': 92,
+  'GBP-USD': 97,
+  'EUR-USD': 96,
+  'XAG-USD': 93,
+} as const;
+export type BotMarket = keyof typeof LIGHTER_MARKET_IDS;
+
 /** Returns the proxy root URL, absolute on Android, empty string in browser (uses relative URLs). */
 export function getProxyBase(): string {
   try {
@@ -628,17 +638,25 @@ export async function startBot(
   viewKey: string,
   xmrBalance: number,
   currency?: HedgeCurrency,
+  marketId?: number,
 ): Promise<{ started: boolean; targetXmr: number }> {
   const res = await proxyFetch<{ started: boolean; target_xmr: number }>('/bot/start', {
     method: 'POST',
-    body: JSON.stringify({ xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance, currency: currency ?? 'USD' }),
+    body: JSON.stringify({
+      xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance,
+      currency: currency ?? 'USD',
+      ...(marketId != null ? { market_id: marketId } : {}),
+    }),
   });
   return { started: res.started, targetXmr: res.target_xmr };
 }
 
 /** Stop the market-making bot and cancel all open orders. */
-export async function stopBot(): Promise<{ stopped: boolean }> {
-  const res = await proxyFetch<{ stopped: boolean }>('/bot/stop', { method: 'POST' });
+export async function stopBot(marketId?: number): Promise<{ stopped: boolean }> {
+  const res = await proxyFetch<{ stopped: boolean }>('/bot/stop', {
+    method: 'POST',
+    body: JSON.stringify(marketId != null ? { market_id: marketId } : {}),
+  });
   return { stopped: res.stopped };
 }
 
@@ -705,14 +723,15 @@ export async function getBotEarnings(): Promise<BotEarnings> {
 }
 
 /** Get current bot state. */
-export async function getBotStatus(): Promise<BotStatus> {
+export async function getBotStatus(marketId?: number): Promise<BotStatus> {
+  const qs = marketId != null ? `?market_id=${marketId}` : '';
   const res = await proxyFetch<{
     status: string; target_xmr: number; current_position: number;
     available_balance: number; collateral: number; realized_spread: number;
     spread_24h: number;
     open_order_count: number; last_mark_price: number; last_update: number;
     error_msg: string | null; iteration: number; started_at: number;
-  }>('/bot/status');
+  }>(`/bot/status${qs}`);
   return {
     status: res.status as BotStatus['status'],
     targetXmr: res.target_xmr,

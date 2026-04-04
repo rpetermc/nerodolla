@@ -11,9 +11,18 @@ import {
   startBot, stopBot, getBotStatus, getBotEarnings,
   initLighterSession, setProxySessionToken,
   migrateLegacyZkKey, reRegisterZkKey,
+  LIGHTER_MARKET_IDS,
 } from '../../backend/lighter';
-import type { BotStatus, BotEarnings, LighterPosition, HedgeCurrency } from '../../backend/lighter';
+import type { BotStatus, BotEarnings, LighterPosition, HedgeCurrency, BotMarket } from '../../backend/lighter';
 import { loadZkKey, saveZkKey, clearZkKey } from '../../wallet/keystore';
+
+const BOT_MARKETS: { key: BotMarket; label: string; warning?: string }[] = [
+  { key: 'XMR-USD', label: 'XMR/USD' },
+  { key: 'XAU-USD', label: 'XAU/USD' },
+  { key: 'GBP-USD', label: 'GBP/USD' },
+  { key: 'EUR-USD', label: 'EUR/USD', warning: 'Low expected returns — very tight spreads relative to volatility' },
+  { key: 'XAG-USD', label: 'XAG/USD', warning: 'Low expected returns — high adverse selection (43%)' },
+];
 
 interface BotToggleProps {
   xmrBalance: number;
@@ -92,18 +101,21 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [selectedMarket, setSelectedMarket] = useState<BotMarket>('XMR-USD');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const earningsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const selectedMarketId = LIGHTER_MARKET_IDS[selectedMarket];
 
   function stopPolling() {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     if (earningsPollRef.current) { clearInterval(earningsPollRef.current); earningsPollRef.current = null; }
   }
 
-  async function fetchStatus(): Promise<BotStatus | null> {
+  async function fetchStatus(marketId?: number): Promise<BotStatus | null> {
     try {
-      const s = await getBotStatus();
+      const s = await getBotStatus(marketId ?? selectedMarketId);
       setBotStatus(s);
       if (s.status === 'stopped') stopPolling();
       return s;
@@ -273,12 +285,15 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
     setLocalError(null);
     try {
       if (!sessionToken) await ensureSession();
+      // Always pass XMR balance — backend computes the correct target:
+      // XMR market: target = -(xmr_balance)  (short to hedge)
+      // Currency markets: target = +(xmr_value / currency_price)  (long to hedge into currency)
       try {
-        await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+        await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, selectedMarketId);
       } catch (err) {
         if (err instanceof Error && err.message.includes('HTTP 401')) {
           await ensureSession();
-          await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+          await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, selectedMarketId);
         } else {
           throw err;
         }
@@ -297,7 +312,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
     setBusy(true);
     setLocalError(null);
     try {
-      await stopBot();
+      await stopBot(selectedMarketId);
       localStorage.removeItem(botActiveKey);
       stopPolling();
       setBotStatus(prev => prev ? { ...prev, status: 'stopped', openOrderCount: 0 } : null);
@@ -317,7 +332,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
       await saveZkKey(ethWallet.privateKey, newZkPrivKey);
       setSessionToken(sessionToken);
       setProxySessionToken(sessionToken);
-      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, selectedMarketId);
       localStorage.setItem(botActiveKey, 'true');
       await fetchStatus();
       startPolling();
@@ -349,7 +364,9 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
   return (
     <div className="bot-toggle">
       <div className="bot-toggle__header">
-        <span className="bot-toggle__title">Market Making Bot</span>
+        <span className="bot-toggle__title">
+          Market Making Bot{isActive ? ` · ${selectedMarket}` : ''}
+        </span>
         <span className={`bot-toggle__badge ${badgeClass}`}>{badgeLabel}</span>
       </div>
 
@@ -359,7 +376,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
           <div className="bot-toggle__stat-row">
             <span>Position</span>
             <span>
-              {botStatus.currentPosition.toFixed(4)} XMR
+              {botStatus.currentPosition.toFixed(4)} {selectedMarket.split('-')[0]}
               <span className="bot-toggle__target">
                 {' '}(Target {botStatus.targetXmr.toFixed(4)})
               </span>
@@ -392,10 +409,30 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
       )}
 
       {!isActive && status !== 'error' && (
-        <p className="bot-toggle__desc">
-          Place limit orders on both sides of the XMR/USD perp to earn spread
-          income on top of funding payments.
-        </p>
+        <>
+          <p className="bot-toggle__desc">
+            Place limit orders on both sides of the {selectedMarket} perp to earn spread
+            income{selectedMarket === 'XMR-USD' ? ' on top of funding payments' : ''}.
+          </p>
+          <div className="bot-toggle__market-select">
+            <label className="bot-toggle__market-label">Market</label>
+            <select
+              className="bot-toggle__market-dropdown"
+              value={selectedMarket}
+              onChange={(e) => setSelectedMarket(e.target.value as BotMarket)}
+              disabled={busy}
+            >
+              {BOT_MARKETS.map(m => (
+                <option key={m.key} value={m.key}>{m.label}{m.warning ? ' ⚠' : ''}</option>
+              ))}
+            </select>
+          </div>
+          {BOT_MARKETS.find(m => m.key === selectedMarket)?.warning && (
+            <div className="bot-toggle__market-warn">
+              {BOT_MARKETS.find(m => m.key === selectedMarket)!.warning}
+            </div>
+          )}
+        </>
       )}
 
       {localError && (
