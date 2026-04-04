@@ -36,7 +36,7 @@ export default defineConfig({
     },
   },
   build: {
-    target: 'esnext',
+    target: ['es2020', 'safari15'],
     rollupOptions: {
       external: ['monero-ts'],
       output: {

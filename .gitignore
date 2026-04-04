@@ -40,6 +40,7 @@ monero-wallet-rpc-wrapper.sh
 monero-wallet-rpc-recheck.sh
 monerod-pruned.service
 deploy.py
+deploy-staging.sh
 Caddyfile
 rescan_wallets.py
 
@@ -50,6 +51,7 @@ nerodolla-proxy.service
 *.log
 
 # Internal / not for publication
+CLAUDE.md
 AUDIT_REPORT.txt
 PRIVACY_CRITIQUE.txt
 TODO.md
