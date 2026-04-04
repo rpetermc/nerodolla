@@ -23,13 +23,14 @@ import { transferXmr, formatXmr, createSubaddress } from '../../backend/lws';
 const DEFAULT_FROM = SWAP_TOKENS.find((t) => t.symbol === 'BTC')!;
 const DEFAULT_TO   = XMR_TOKEN;
 
-export function SwapFlow() {
+export function SwapFlow({ enableWagyu = true, enableTrocador = true }: { enableWagyu?: boolean; enableTrocador?: boolean }) {
   const {
     xmrKeys,
     ethWallet,
     xmrInfo,
     walletCreatedHeight,
     receiveAddress,
+    receiveAddressIndex,
     setReceiveAddress,
     swapStep,
     swapOrders,
@@ -50,14 +51,14 @@ export function SwapFlow() {
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Generate XMR receive address if needed (used as destination when to=XMR)
+  // Ensure we have a subaddress (not the primary) for receiving swapped XMR
   useEffect(() => {
-    if (toToken.chainId === MONERO_CHAIN_ID && xmrKeys && !receiveAddress) {
+    if (toToken.chainId === MONERO_CHAIN_ID && xmrKeys && receiveAddressIndex === 0) {
       createSubaddress(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate)
         .then(({ address, index }) => setReceiveAddress(address, index))
         .catch(() => { /* use primary address as fallback */ });
     }
-  }, [toToken.chainId, xmrKeys, receiveAddress, setReceiveAddress]);
+  }, [toToken.chainId, xmrKeys, receiveAddressIndex, setReceiveAddress]);
 
   // Stop polling on unmount
   useEffect(() => {
@@ -107,7 +108,7 @@ export function SwapFlow() {
     setSwapError(null);
     setSwapStep('quoting');
     try {
-      const q = await getBestQuote(fromToken, toToken, fromAmount);
+      const q = await getBestQuote(fromToken, toToken, fromAmount, { enableWagyu, enableTrocador });
       setQuote(q);
       setSwapStep('confirm');
     } catch (err) {

@@ -25,22 +25,23 @@ import {
   SOLANA_CHAIN_ID,
 } from './wagyu';
 
-export const TROCADOR_API_BASE = 'https://trocador.app';
+export const TROCADOR_API_BASE = 'https://api.trocador.app';
 export const TROCADOR_API_KEY: string = import.meta.env.VITE_TROCADOR_API_KEY ?? '';
 
 // ── Token mapping ───────────────────────────────────────────────────────────────
 
-/** Map wagyu chain IDs to Trocador network strings. */
+/** Map wagyu chain IDs to Trocador network strings.
+ *  Values must match Trocador's /api/coins `network` field exactly. */
 const CHAIN_TO_NETWORK: Record<number, string> = {
   [MONERO_CHAIN_ID]:    'Mainnet',
   [BITCOIN_CHAIN_ID]:   'Mainnet',
-  [ETHEREUM_CHAIN_ID]:  'Mainnet',
+  [ETHEREUM_CHAIN_ID]:  'ERC20',
   [OPTIMISM_CHAIN_ID]:  'Optimism',
-  [BSC_CHAIN_ID]:       'BSC',
-  [BASE_CHAIN_ID]:      'Base',
+  [BSC_CHAIN_ID]:       'BEP20',
+  [BASE_CHAIN_ID]:      'base',
   [ARBITRUM_CHAIN_ID]:  'Arbitrum',
-  [AVALANCHE_CHAIN_ID]: 'Avalanche',
-  [SOLANA_CHAIN_ID]:    'Solana',
+  [AVALANCHE_CHAIN_ID]: 'AVAXC',
+  [SOLANA_CHAIN_ID]:    'Mainnet',
 };
 
 /**
@@ -80,19 +81,31 @@ export type TrocadorStatus =
   | 'halted'
   | 'refunded';
 
+/** A single provider quote inside the new_rate response. */
+export interface TrocadorQuote {
+  provider: string;
+  amount_to: string;
+  eta: number;
+  kycrating: string;
+  logpolicy: string;
+  insurance: number;
+  fixed: string;
+  amount_from_USD?: string;
+  amount_to_USD?: string;
+  USD_total_cost_percentage?: string;
+}
+
+/** Top-level response from GET /api/new_rate. */
 export interface TrocadorRate {
   trade_id: string;
-  rate_id: string;
   provider: string;
   amount_from: number;
   amount_to: number;
-  min: number;
-  max: number;
   fixed: boolean;
   payment: boolean;
-  /** Estimated time in minutes. */
-  eta: number;
-  // Optional fields returned by some providers
+  status: string;
+  quotes?: { quotes: TrocadorQuote[] };
+  // USD amounts come from the best quote
   amount_from_usd?: string;
   amount_to_usd?: string;
   network_fee_usd?: string;
@@ -126,22 +139,12 @@ export interface TrocadorTrade {
 // ── Fetch helper ────────────────────────────────────────────────────────────────
 
 async function trocadorFetch<T>(path: string, params: Record<string, string> = {}): Promise<T> {
-  const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
-  const isNative = !!cap?.isNativePlatform?.();
-
-  let url: string;
-
-  if (isNative) {
-    // Route via proxy: /trocador/api/new_rate, /trocador/api/trade, etc.
-    const { getProxyBase } = await import('./lighter');
-    const proxyBase = getProxyBase();
-    const qs = new URLSearchParams(params).toString();
-    url = `${proxyBase}/trocador${path}${qs ? `?${qs}` : ''}`;
-  } else {
-    const allParams = { api_key: TROCADOR_API_KEY, ...params };
-    const qs = new URLSearchParams(allParams).toString();
-    url = `${TROCADOR_API_BASE}${path}${qs ? `?${qs}` : ''}`;
-  }
+  // Always route via proxy — trocador.app has no CORS headers, so direct
+  // browser requests are blocked.  The proxy injects the API key server-side.
+  const { getProxyBase } = await import('./lighter');
+  const proxyBase = getProxyBase();
+  const qs = new URLSearchParams(params).toString();
+  const url: string = `${proxyBase}/trocador${path}${qs ? `?${qs}` : ''}`;
 
   const res = await fetch(url);
   if (!res.ok) {
@@ -165,20 +168,30 @@ export async function getRate(
   from: SwapToken,
   to: SwapToken,
   amountFrom: string,
-): Promise<TrocadorRate[]> {
+): Promise<TrocadorRate> {
   const fromParams = toTrocadorParams(from);
   const toParams = toTrocadorParams(to);
   if (!fromParams || !toParams) {
     throw new Error(`Unsupported token pair for Trocador: ${from.symbol} → ${to.symbol}`);
   }
 
-  return trocadorFetch<TrocadorRate[]>('/api/new_rate', {
+  const resp = await trocadorFetch<TrocadorRate>('/api/new_rate', {
     ticker_from:  fromParams.ticker,
     ticker_to:    toParams.ticker,
     network_from: fromParams.network,
     network_to:   toParams.network,
     amount_from:  amountFrom,
   });
+
+  // Enrich top-level with USD amounts from the best quote if available
+  const bestQuote = resp.quotes?.quotes?.[0];
+  if (bestQuote && !resp.amount_from_usd) {
+    resp.amount_from_usd = bestQuote.amount_from_USD;
+    resp.amount_to_usd = bestQuote.amount_to_USD;
+    resp.estimated_time = bestQuote.eta;
+  }
+
+  return resp;
 }
 
 /**
@@ -190,12 +203,12 @@ export async function getRate(
  * @param refundAddress Address for refunds if the trade fails
  */
 export async function createTrade(
-  rateId: string,
+  tradeId: string,
   address: string,
   refundAddress?: string,
 ): Promise<TrocadorTrade> {
   const params: Record<string, string> = {
-    rate_id: rateId,
+    trade_id: tradeId,
     address: address,
   };
   if (refundAddress) params.refund_address = refundAddress;

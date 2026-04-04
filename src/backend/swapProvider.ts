@@ -9,8 +9,14 @@ import {
   getSwapQuote,
   createSwapOrder as wagyuCreateSwapOrder,
   getOrder,
+  getQuote as wagyuHedgeQuote,
+  createOrder as wagyuHedgeCreateOrder,
   toAtomicStr,
   formatTokenAmount,
+  xmrToAtomic,
+  XMR_TOKEN,
+  ARBITRUM_CHAIN_ID,
+  USDC_ARB_ADDRESS,
   type SwapToken,
   type WagyuQuote,
   type WagyuOrder,
@@ -121,16 +127,6 @@ function normalizeWagyuQuote(wq: WagyuQuote, fromAmount: string): SwapQuote {
 
 // ── Normalization: trocador → SwapQuote ───────────────────────────────────────
 
-/**
- * Pick the best rate from a trocador rates array (highest output amount).
- */
-function pickBestTrocadorRate(rates: TrocadorRate[]): TrocadorRate | null {
-  if (rates.length === 0) return null;
-  return rates.reduce((best, r) => {
-    return (r.amount_to ?? 0) > (best.amount_to ?? 0) ? r : best;
-  });
-}
-
 function normalizeTrocadorQuote(
   rate: TrocadorRate,
   fromAmount: string,
@@ -240,22 +236,27 @@ function normalizeTrocadorOrder(trade: TrocadorTrade): SwapOrder {
  * (highest toAmount).  If one provider fails or times out, returns the other.
  * If both fail, throws the first error.
  */
+export interface QuoteOptions {
+  enableWagyu?: boolean;
+  enableTrocador?: boolean;
+}
+
 export async function getBestQuote(
   from: SwapToken,
   to: SwapToken,
   fromAmount: string,
+  opts: QuoteOptions = {},
 ): Promise<SwapQuote> {
+  const useWagyu = opts.enableWagyu !== false;
+  const useTrocador = opts.enableTrocador !== false;
+
   const [wagyuResult, trocadorResult] = await Promise.allSettled([
-    // wagyu
-    withTimeout(
-      (_signal) => getSwapQuote(from, to, fromAmount),
-      QUOTE_TIMEOUT_MS,
-    ),
-    // trocador
-    withTimeout(
-      (_signal) => getRate(from, to, fromAmount),
-      QUOTE_TIMEOUT_MS,
-    ),
+    useWagyu
+      ? withTimeout((_signal) => getSwapQuote(from, to, fromAmount), QUOTE_TIMEOUT_MS)
+      : Promise.reject(new Error('disabled')),
+    useTrocador
+      ? withTimeout((_signal) => getRate(from, to, fromAmount), QUOTE_TIMEOUT_MS)
+      : Promise.reject(new Error('disabled')),
   ]);
 
   let wagyuQuote: SwapQuote | null = null;
@@ -266,10 +267,9 @@ export async function getBestQuote(
   }
 
   if (trocadorResult.status === 'fulfilled') {
-    const rates = trocadorResult.value;
-    const bestRate = Array.isArray(rates) ? pickBestTrocadorRate(rates) : rates;
-    if (bestRate) {
-      trocadorQuote = normalizeTrocadorQuote(bestRate, fromAmount, to);
+    const rate = trocadorResult.value;
+    if (rate && rate.amount_to > 0) {
+      trocadorQuote = normalizeTrocadorQuote(rate, fromAmount, to);
     }
   }
 
@@ -313,7 +313,7 @@ export async function createOrder(
   // trocador
   const rate = quote._providerData as TrocadorRate;
   const trade = await createTrade(
-    rate.rate_id,
+    rate.trade_id,
     toAddress,
     refundAddress,
   );
@@ -333,6 +333,79 @@ export async function pollSwapOrder(order: SwapOrder): Promise<SwapOrder> {
   // trocador
   const trade = await getTrade(order.orderId);
   return normalizeTrocadorOrder(trade);
+}
+
+// ── Hedge-specific API (XMR → USDC on Arbitrum) ─────────────────────────────
+// Uses wagyu's hedge API key (0.5% integrator fee) and compares with trocador.
+
+const USDC_ARB_TOKEN: SwapToken = {
+  symbol: 'USDC', name: 'USD Coin', chainId: ARBITRUM_CHAIN_ID,
+  chainName: 'Arbitrum', tokenId: USDC_ARB_ADDRESS, decimals: 6,
+};
+
+/**
+ * Get the best hedge quote (XMR → USDC on Arbitrum) from wagyu and trocador.
+ * Wagyu uses the hedge API key with 0.5% integrator fee.
+ */
+export async function getHedgeBestQuote(xmrAmount: string): Promise<SwapQuote> {
+  const [wagyuResult, trocadorResult] = await Promise.allSettled([
+    withTimeout(() => wagyuHedgeQuote(xmrAmount), QUOTE_TIMEOUT_MS),
+    withTimeout(() => getRate(XMR_TOKEN, USDC_ARB_TOKEN, xmrAmount), QUOTE_TIMEOUT_MS),
+  ]);
+
+  let wagyuQuote: SwapQuote | null = null;
+  let trocadorQuote: SwapQuote | null = null;
+
+  if (wagyuResult.status === 'fulfilled') {
+    wagyuQuote = normalizeWagyuQuote(wagyuResult.value, xmrAmount);
+  }
+  if (trocadorResult.status === 'fulfilled') {
+    const rate = trocadorResult.value;
+    if (rate && rate.amount_to > 0) {
+      trocadorQuote = normalizeTrocadorQuote(rate, xmrAmount, USDC_ARB_TOKEN);
+    }
+  }
+
+  if (wagyuQuote && trocadorQuote) {
+    const wAmt = BigInt(wagyuQuote.toAmount);
+    const tAmt = BigInt(trocadorQuote.toAmount);
+    return tAmt > wAmt ? trocadorQuote : wagyuQuote;
+  }
+  if (wagyuQuote) return wagyuQuote;
+  if (trocadorQuote) return trocadorQuote;
+
+  throw wagyuResult.status === 'rejected'
+    ? wagyuResult.reason
+    : trocadorResult.status === 'rejected'
+      ? trocadorResult.reason
+      : new Error('No hedge quotes available');
+}
+
+/**
+ * Create a hedge order from a SwapQuote. Routes to wagyu or trocador.
+ * For trocador, converts depositAmount to picoXMR for transferXmr compatibility.
+ *
+ * @param quote       Quote from getHedgeBestQuote
+ * @param toAddress   Lighter intent address (Arbitrum) for USDC deposit
+ * @param refundAddress  XMR address for refunds (trocador only)
+ */
+export async function createHedgeOrder(
+  quote: SwapQuote,
+  toAddress: string,
+  refundAddress?: string,
+): Promise<SwapOrder> {
+  if (quote.provider === 'wagyu') {
+    const wo = await wagyuHedgeCreateOrder(quote.fromAmount, toAddress);
+    return normalizeWagyuOrder(wo);
+  }
+
+  // trocador
+  const rate = quote._providerData as TrocadorRate;
+  const trade = await createTrade(rate.trade_id, toAddress, refundAddress);
+  const order = normalizeTrocadorOrder(trade);
+  // Convert human-readable XMR to picoXMR for transferXmr compatibility
+  order.depositAmount = xmrToAtomic(order.depositAmount);
+  return order;
 }
 
 // Re-export token utilities for convenience

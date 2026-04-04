@@ -9,13 +9,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWalletStore } from '../../store/wallet';
 import { getDepositIntentAddress } from '../../backend/deposit';
+import { MIN_SWAP_XMR } from '../../backend/wagyu';
 import {
-  getQuote,
-  createOrder,
-  getOrder,
-  MIN_SWAP_XMR,
-} from '../../backend/wagyu';
-import type { WagyuQuote, WagyuOrder, WagyuOrderDetail } from '../../backend/wagyu';
+  getHedgeBestQuote,
+  createHedgeOrder,
+  pollSwapOrder,
+  type SwapQuote,
+  type SwapOrder,
+} from '../../backend/swapProvider';
 import { transferXmr, presyncWallet } from '../../backend/lws';
 import {
   checkLighterSetup,
@@ -37,7 +38,7 @@ import { setProxySessionToken, renewSession } from '../../backend/lighter';
 // ── Persistence helpers (resume after PIN lock) ────────────────────────────
 
 interface PersistedHedgeState {
-  wagyuOrder: WagyuOrder;
+  bridgeOrder: SwapOrder;
   isNewAccount: boolean;
   savedAt: number;
 }
@@ -118,9 +119,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const [pct, setPct]                     = useState(20);   // % of spendable balance
   const [usdcReady, setUsdcReady]         = useState(0);    // USDC already in Lighter
   const [depositPendingAmt, setDepositPendingAmt] = useState<number | null>(null);
-  const [quote, setQuote]                 = useState<WagyuQuote | null>(null);
-  // wagyuOrder is stored only in ref (not needed in JSX);
-  const [bridgeDetail, setBridgeDetail]   = useState<WagyuOrderDetail | null>(null);
+  const [quote, setQuote]                 = useState<SwapQuote | null>(null);
+  // bridgeOrder is stored only in ref (not needed in JSX);
+  const [bridgeDetail, setBridgeDetail]   = useState<SwapOrder | null>(null);
   const [signingData, setSigningData]     = useState<LighterSigningData | null>(null);
   // isNewAccount is stored only in ref (not needed in JSX);
   const [errorMsg, setErrorMsg]           = useState<string | null>(null);
@@ -162,8 +163,8 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   // Refs for values accessed inside interval callbacks
   const pollRef          = useRef<ReturnType<typeof setInterval> | null>(null);
   const quoteTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wagyuOrderRef    = useRef<WagyuOrder | null>(null);
-  const bridgeDetailRef  = useRef<WagyuOrderDetail | null>(null);
+  const bridgeOrderRef   = useRef<SwapOrder | null>(null);
+  const bridgeDetailRef  = useRef<SwapOrder | null>(null);
   const isNewAccountRef  = useRef(false);
   const signingDataRef   = useRef<LighterSigningData | null>(null);
   const modeRef          = useRef<'simple' | 'bot'>('simple');
@@ -174,11 +175,11 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   useEffect(() => {
     const saved = loadHedgeState(activeWalletId);
     if (saved) {
-      wagyuOrderRef.current = saved.wagyuOrder;
+      bridgeOrderRef.current = saved.bridgeOrder;
       isNewAccountRef.current = saved.isNewAccount;
       setIsResumed(true);
       setStep('bridging');
-      startBridgePolling(saved.wagyuOrder.orderId, saved.wagyuOrder);
+      startBridgePolling(saved.bridgeOrder);
     } else if (preCheck) {
       // Skip the idle CTA — the caller knows USDC is already in Lighter.
       runCheck();
@@ -300,7 +301,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     }
     quoteTimerRef.current = setTimeout(async () => {
       try {
-        const q = await getQuote(amt);
+        const q = await getHedgeBestQuote(amt);
         setQuote(q);
       } catch {
         // Non-fatal — quote display is best-effort
@@ -420,8 +421,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       const intentResult = await getDepositIntentAddress(ethWallet.address, 42161);
       const intentAddr = intentResult.intent_address;
 
-      const order = await createOrder(xmrFromPct.toFixed(6), intentAddr);
-      wagyuOrderRef.current = order;
+      const hedgeQuote = quote ?? await getHedgeBestQuote(xmrFromPct.toFixed(6));
+      const order = await createHedgeOrder(hedgeQuote, intentAddr, xmrKeys.primaryAddress);
+      bridgeOrderRef.current = order;
 
       setStep('sending_xmr');
       try {
@@ -445,8 +447,8 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       }
 
       setStep('bridging');
-      saveHedgeState({ wagyuOrder: order, isNewAccount: isNewAccountRef.current }, activeWalletId);
-      startBridgePolling(order.orderId, order);
+      saveHedgeState({ bridgeOrder: order, isNewAccount: isNewAccountRef.current }, activeWalletId);
+      startBridgePolling(order);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Transaction failed');
       setStep('error');
@@ -455,11 +457,12 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
 
   // ── Bridge polling ──────────────────────────────────────────────────────────
 
-  function startBridgePolling(orderId: string, order: WagyuOrder) {
+  function startBridgePolling(order: SwapOrder) {
     if (pollRef.current) clearInterval(pollRef.current);
+    const pollInterval = order.provider === 'trocador' ? 60_000 : 10_000;
     const tick = async () => {
       try {
-        const detail = await getOrder(orderId);
+        const detail = await pollSwapOrder(order);
         setBridgeDetail(detail);
         bridgeDetailRef.current = detail;
 
@@ -474,11 +477,11 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
           clearHedgeState(activeWalletId);
-          setErrorMsg(`Bridge ${detail.status}${detail.errorMessage ? `: ${detail.errorMessage}` : ''}. Your XMR balance was not affected.`);
+          setErrorMsg(`Bridge ${detail.status}. Your XMR balance was not affected.`);
           setStep('error');
         }
       } catch (err) {
-        // If wagyu returns 404 the order doesn't exist — clear state immediately
+        // If provider returns 404 the order doesn't exist — clear state immediately
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes('404')) {
           if (pollRef.current) clearInterval(pollRef.current);
@@ -491,7 +494,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       }
     };
     tick(); // immediate first check (especially important on resume)
-    pollRef.current = setInterval(tick, 10_000);
+    pollRef.current = setInterval(tick, pollInterval);
   }
 
   // ── Account polling (new accounts only) ────────────────────────────────────
@@ -554,7 +557,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         setProxySessionToken(result.sessionToken);
       }
       setStep('opening');
-      const order = wagyuOrderRef.current;
+      const order = bridgeOrderRef.current;
       const detail = bridgeDetailRef.current;
       if (modeRef.current === 'bot') {
         await doStartBot();
@@ -574,14 +577,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
 
   // ── Step: opening → confirming_position → live ──────────────────────────────
 
-  async function doOpenHedge(order: WagyuOrder, detail: WagyuOrderDetail | null) {
+  async function doOpenHedge(order: SwapOrder, detail: SwapOrder | null) {
     if (modeRef.current === 'bot') {
       setStep('opening');
       await doStartBot();
       return;
     }
     try {
-      const rawOutput = detail?.actualOutput ?? order.expectedOutput;
+      const rawOutput = detail?.expectedOutput ?? order.expectedOutput;
       const usdcFloat = Number(rawOutput) / 1e6;
       const usdcAmount = usdcFloat.toFixed(2);
       // Cap position size to what the USDC can safely margin at 10x leverage
@@ -921,7 +924,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           </div>
           <div className="hedge-orch__review-row">
             <span>Bridge</span>
-            <span>wagyu.xyz</span>
+            <span>{quote?.provider === 'trocador' ? 'Trocador' : 'wagyu.xyz'}</span>
           </div>
           <div className="hedge-orch__review-row">
             <span>Lock value in</span>
@@ -950,24 +953,28 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     let bridgingLabel = 'Waiting for XMR to appear on-chain…';
     let bridgingNote: string | null = null;
     if (bridgeDetail) {
-      const { currentStep, confirmations, requiredConfirmations, status } = bridgeDetail;
+      const { confirmations, requiredConfirmations, status, provider } = bridgeDetail;
+      const providerName = provider === 'trocador' ? 'Trocador' : 'wagyu';
       const hasConfs = confirmations !== null && confirmations !== undefined
         && requiredConfirmations !== null && requiredConfirmations !== undefined;
       if (status === 'awaiting_deposit') {
         bridgingLabel = isResumed
-          ? 'Wagyu order awaiting XMR deposit — XMR may not have been sent'
+          ? `${providerName} order awaiting XMR deposit — XMR may not have been sent`
           : 'Waiting for XMR deposit…';
         bridgingNote = isResumed
-          ? 'No XMR has reached the wagyu deposit address. If your balance is unchanged, tap "Check account" or "Start fresh" to begin a new hedge.'
+          ? `No XMR has reached the ${providerName} deposit address. If your balance is unchanged, tap "Check account" or "Start fresh" to begin a new hedge.`
           : 'Transaction broadcast — waiting for first block confirmation.';
       } else if (!hasConfs || status === 'complete') {
         bridgingLabel = 'Swap complete — checking your Lighter account…';
+        bridgingNote = null;
+      } else if (status === 'swapping') {
+        bridgingLabel = 'Confirmations received — swapping…';
         bridgingNote = null;
       } else {
         const minsLeft = Math.ceil((requiredConfirmations! - confirmations!) * 2);
         bridgingLabel = `XMR confirming: ${confirmations}/${requiredConfirmations} blocks`;
         bridgingNote = confirmations! < requiredConfirmations!
-          ? `~${minsLeft} min remaining (${currentStep})`
+          ? `~${minsLeft} min remaining`
           : 'All confirmations received — swapping…';
       }
     }

@@ -2,21 +2,19 @@
  * TopUpFlow — swap XMR → USDC and deposit directly to Lighter as additional margin.
  *
  * Displayed on the HedgeScreen when the user already has a hedged position.
- * Uses the same wagyu bridge + Lighter intent address pipeline as HedgeOrchestrator
- * but skips account setup and position-opening — the USDC lands at the intent address
- * and Lighter automatically credits it as collateral on the existing account.
+ * Uses wagyu or trocador (best rate) + Lighter intent address pipeline.
  */
 import { useState, useEffect, useRef } from 'react';
 import { useWalletStore } from '../../store/wallet';
 import { getDepositIntentAddress } from '../../backend/deposit';
+import { atomicToUsdc, MIN_SWAP_XMR } from '../../backend/wagyu';
 import {
-  getQuote,
-  createOrder,
-  getOrder,
-  atomicToUsdc,
-  MIN_SWAP_XMR,
-} from '../../backend/wagyu';
-import type { WagyuQuote, WagyuOrder, WagyuOrderDetail } from '../../backend/wagyu';
+  getHedgeBestQuote,
+  createHedgeOrder,
+  pollSwapOrder,
+  type SwapQuote,
+  type SwapOrder,
+} from '../../backend/swapProvider';
 import { transferXmr, formatXmr } from '../../backend/lws';
 
 type Step =
@@ -33,15 +31,15 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
 
   const [step, setStep]             = useState<Step>('idle');
   const [pct, setPct]               = useState(10);
-  const [quote, setQuote]           = useState<WagyuQuote | null>(null);
+  const [quote, setQuote]           = useState<SwapQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteErr, setQuoteErr]     = useState<string | null>(null);
-  const [bridgeDetail, setBridgeDetail] = useState<WagyuOrderDetail | null>(null);
+  const [bridgeDetail, setBridgeDetail] = useState<SwapOrder | null>(null);
   const [errorMsg, setErrorMsg]     = useState<string | null>(null);
 
   const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null);
   const quoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const orderRef      = useRef<WagyuOrder | null>(null);
+  const orderRef      = useRef<SwapOrder | null>(null);
 
   useEffect(() => {
     return () => {
@@ -68,7 +66,7 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
     setQuoteLoading(true);
     quoteTimerRef.current = setTimeout(async () => {
       try {
-        const q = await getQuote(xmr.toFixed(6));
+        const q = await getHedgeBestQuote(xmr.toFixed(6));
         setQuote(q);
         setQuoteErr(null);
       } catch (err) {
@@ -97,7 +95,8 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
     setStep('creating_order');
     try {
       const intentResult = await getDepositIntentAddress(ethWallet.address, 42161);
-      const order = await createOrder(xmrAmount.toFixed(6), intentResult.intent_address);
+      const hedgeQuote = quote ?? await getHedgeBestQuote(xmrAmount.toFixed(6));
+      const order = await createHedgeOrder(hedgeQuote, intentResult.intent_address, xmrKeys.primaryAddress);
       orderRef.current = order;
 
       setStep('sending_xmr');
@@ -111,7 +110,7 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
       );
 
       setStep('bridging');
-      startBridgePolling(order.orderId);
+      startBridgePolling(order);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Transaction failed');
       setStep('error');
@@ -120,11 +119,12 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
 
   // ── Bridge polling ───────────────────────────────────────────────────────────
 
-  function startBridgePolling(orderId: string) {
+  function startBridgePolling(order: SwapOrder) {
     if (pollRef.current) clearInterval(pollRef.current);
+    const pollInterval = order.provider === 'trocador' ? 60_000 : 10_000;
     pollRef.current = setInterval(async () => {
       try {
-        const detail = await getOrder(orderId);
+        const detail = await pollSwapOrder(order);
         setBridgeDetail(detail);
         if (detail.status === 'complete') {
           clearInterval(pollRef.current!);
@@ -134,11 +134,11 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           clearInterval(pollRef.current!);
           pollRef.current = null;
-          setErrorMsg(`Bridge ${detail.status}${detail.errorMessage ? `: ${detail.errorMessage}` : ''}`);
+          setErrorMsg(`Bridge ${detail.status}`);
           setStep('error');
         }
       } catch { /* transient — keep polling */ }
-    }, 10_000);
+    }, pollInterval);
   }
 
   function handleReset() {
@@ -152,6 +152,7 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
   }
 
   const amountValid = maxXmr > 0 && xmrAmount >= parseFloat(MIN_SWAP_XMR);
+  const providerName = quote?.provider === 'trocador' ? 'Trocador' : 'wagyu.xyz';
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -247,7 +248,7 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
           </div>
           <div className="hedge-orch__review-row">
             <span>Bridge</span>
-            <span>wagyu.xyz</span>
+            <span>{providerName}</span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -267,7 +268,9 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
       step === 'creating_order' ? 'Creating swap order…' :
       step === 'sending_xmr'    ? `Sending ${xmrAmount.toFixed(4)} XMR…` :
       bridgeDetail
-        ? `XMR confirming: ${bridgeDetail.confirmations}/${bridgeDetail.requiredConfirmations} blocks`
+        ? bridgeDetail.status === 'swapping'
+          ? 'Confirmations received — swapping…'
+          : `XMR confirming: ${bridgeDetail.confirmations ?? '?'}/${bridgeDetail.requiredConfirmations ?? '?'} blocks`
         : 'Waiting for XMR deposit…';
     return (
       <div className="top-up-flow top-up-flow--open">
@@ -286,7 +289,7 @@ export function TopUpFlow({ onTopUpComplete }: TopUpFlowProps) {
 
   if (step === 'complete') {
     const order  = orderRef.current;
-    const usdc   = atomicToUsdc(bridgeDetail?.actualOutput ?? order?.expectedOutput ?? '0');
+    const usdc   = atomicToUsdc(bridgeDetail?.expectedOutput ?? order?.expectedOutput ?? '0');
     return (
       <div className="top-up-flow top-up-flow--open">
         <div style={{ color: 'var(--color-green)', fontWeight: 600 }}>

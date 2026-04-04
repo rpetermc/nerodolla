@@ -1,8 +1,11 @@
+import { useState } from 'react';
 import { useWalletStore } from '../../store/wallet';
 import { SwapFlow } from '../components/SwapFlow';
 
 export function SwapScreen() {
   const { navigate } = useWalletStore();
+  const [enableWagyu, setEnableWagyu] = useState(true);
+  const [enableTrocador, setEnableTrocador] = useState(true);
 
   return (
     <div className="screen swap-screen">
@@ -15,24 +18,37 @@ export function SwapScreen() {
 
       <div className="swap-screen__info">
         <div className="swap-screen__providers">
-          <a href="https://wagyu.xyz" target="_blank" rel="noopener noreferrer" className="swap-screen__wagyu-badge">
-            <img src="/wagyu-logo.avif" alt="wagyu.xyz" className="swap-screen__wagyu-logo" />
-            <span>wagyu.xyz</span>
-          </a>
-          <span className="swap-screen__provider-sep">+</span>
-          <a href="https://trocador.app" target="_blank" rel="noopener noreferrer" className="swap-screen__wagyu-badge">
-            <span>trocador.app</span>
-          </a>
+          <span className="swap-screen__powered-by">Powered by</span>
+          <div className="swap-screen__provider-badges">
+            <label className={`swap-screen__provider-badge${enableWagyu ? '' : ' swap-screen__provider-badge--off'}`}>
+              <input
+                type="checkbox"
+                checked={enableWagyu}
+                onChange={() => { if (enableWagyu && !enableTrocador) return; setEnableWagyu(!enableWagyu); }}
+              />
+              <img src="/wagyu-logo.avif" alt="wagyu.xyz" className="swap-screen__provider-logo" />
+              <span>wagyu.xyz</span>
+            </label>
+            <label className={`swap-screen__provider-badge${enableTrocador ? '' : ' swap-screen__provider-badge--off'}`}>
+              <input
+                type="checkbox"
+                checked={enableTrocador}
+                onChange={() => { if (enableTrocador && !enableWagyu) return; setEnableTrocador(!enableTrocador); }}
+              />
+              <img src="/trocador-logo.png" alt="trocador.app" className="swap-screen__provider-logo" />
+              <span>trocador.app</span>
+            </label>
+          </div>
         </div>
         <p>
-          Swap BTC, ETH, SOL and other coins directly into XMR. Best rate auto-selected from multiple providers. No exchange account, no KYC.
+          Best rate auto-selected. Untick a provider to exclude it.
         </p>
         <div className="swap-screen__fee-note">
           NeroHedge fee: 0% · provider fees shown in quote
         </div>
       </div>
 
-      <SwapFlow />
+      <SwapFlow enableWagyu={enableWagyu} enableTrocador={enableTrocador} />
     </div>
   );
 }
