@@ -837,7 +837,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     const currencyLockValue = currencyLockOz !== null
       ? (currency === 'XAU' || currency === 'XAG')
         ? currencyLockOz < 1
-          ? `${(currencyLockOz * 31.1035).toFixed(1)}`
+          ? `${(currencyLockOz * 31.1035).toFixed(3)}`
           : `${currencyLockOz.toFixed(2)}`
         : currencyLockOz.toFixed(2)
       : null;

@@ -601,6 +601,30 @@ export function estimateDailyFunding(
   return usdPositionSize * rate8h * 3; // 3 funding periods per day
 }
 
+// ── Market definitions ────────────────────────────────────────────────────────
+
+export interface MarketDef {
+  marketId: number;
+  symbol: string;
+  currency: HedgeCurrency;
+  label: string;
+  warning?: string; // amber suitability warning
+}
+
+export const AVAILABLE_MARKETS: MarketDef[] = [
+  { marketId: 77,  symbol: 'XMR-USD', currency: 'USD', label: 'XMR-USD' },
+  { marketId: 92,  symbol: 'XAU-USD', currency: 'XAU', label: 'Gold' },
+  { marketId: 97,  symbol: 'GBP-USD', currency: 'GBP', label: 'Pound' },
+  { marketId: 96,  symbol: 'EUR-USD', currency: 'EUR', label: 'Euro',
+    warning: 'Tight spreads — may not cover costs' },
+  { marketId: 93,  symbol: 'XAG-USD', currency: 'XAG', label: 'Silver',
+    warning: 'High adverse selection — may lose on fills' },
+];
+
+export const CURRENCY_TO_MARKET_ID: Record<HedgeCurrency, number> = {
+  USD: 77, XAU: 92, XAG: 93, EUR: 96, GBP: 97,
+};
+
 // ── MM-Bot API ────────────────────────────────────────────────────────────────
 
 export interface BotStatus {
@@ -628,17 +652,25 @@ export async function startBot(
   viewKey: string,
   xmrBalance: number,
   currency?: HedgeCurrency,
-): Promise<{ started: boolean; targetXmr: number }> {
-  const res = await proxyFetch<{ started: boolean; target_xmr: number }>('/bot/start', {
+  marketId?: number,
+): Promise<{ started: boolean; targetXmr: number; marketId: number }> {
+  const res = await proxyFetch<{ started: boolean; target_xmr: number; market_id: number }>('/bot/start', {
     method: 'POST',
-    body: JSON.stringify({ xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance, currency: currency ?? 'USD' }),
+    body: JSON.stringify({
+      xmr_address: xmrAddress, view_key: viewKey, xmr_balance: xmrBalance,
+      currency: currency ?? 'USD',
+      ...(marketId != null ? { market_id: marketId } : {}),
+    }),
   });
-  return { started: res.started, targetXmr: res.target_xmr };
+  return { started: res.started, targetXmr: res.target_xmr, marketId: res.market_id };
 }
 
 /** Stop the market-making bot and cancel all open orders. */
-export async function stopBot(): Promise<{ stopped: boolean }> {
-  const res = await proxyFetch<{ stopped: boolean }>('/bot/stop', { method: 'POST' });
+export async function stopBot(marketId?: number): Promise<{ stopped: boolean }> {
+  const res = await proxyFetch<{ stopped: boolean }>('/bot/stop', {
+    method: 'POST',
+    body: JSON.stringify({ ...(marketId != null ? { market_id: marketId } : {}) }),
+  });
   return { stopped: res.stopped };
 }
 
@@ -685,7 +717,8 @@ export interface BotEarnings {
   firstSnapshotAt: number; // Unix seconds of first account value snapshot (0 = none)
 }
 
-export async function getBotEarnings(): Promise<BotEarnings> {
+export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
+  const qs = marketId != null ? `?market_id=${marketId}` : '';
   const res = await proxyFetch<{
     pnl_1d?: number; pnl_7d?: number; pnl_30d?: number; pnl_total?: number;
     first_snapshot_at?: number;
@@ -693,7 +726,7 @@ export async function getBotEarnings(): Promise<BotEarnings> {
     spread_1d?: number; spread_7d?: number; spread_30d?: number; spread_total?: number;
     funding_1d?: number; funding_7d?: number; funding_30d?: number; funding_total?: number;
     first_fill_at?: number;
-  }>('/bot/earnings');
+  }>(`/bot/earnings${qs}`);
   // Support both new (pnl) and old (spread+funding) response formats
   return {
     pnl1d: res.pnl_1d ?? ((res.spread_1d ?? 0) + (res.funding_1d ?? 0)),
@@ -705,14 +738,16 @@ export async function getBotEarnings(): Promise<BotEarnings> {
 }
 
 /** Get current bot state. */
-export async function getBotStatus(): Promise<BotStatus> {
+export async function getBotStatus(marketId?: number): Promise<BotStatus> {
+  const qs = marketId != null ? `?market_id=${marketId}` : '';
   const res = await proxyFetch<{
     status: string; target_xmr: number; current_position: number;
     available_balance: number; collateral: number; realized_spread: number;
     spread_24h: number;
     open_order_count: number; last_mark_price: number; last_update: number;
     error_msg: string | null; iteration: number; started_at: number;
-  }>('/bot/status');
+    initial_capital_usd: number;
+  }>(`/bot/status${qs}`);
   return {
     status: res.status as BotStatus['status'],
     targetXmr: res.target_xmr,
@@ -727,6 +762,7 @@ export async function getBotStatus(): Promise<BotStatus> {
     errorMsg: res.error_msg,
     iteration: res.iteration,
     startedAt: res.started_at,
+    initialCapitalUsd: res.initial_capital_usd,
   };
 }
 

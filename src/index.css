@@ -1222,6 +1222,12 @@ body {
 .bot-pnl__values { font-size: 13px; border-top: 1px solid var(--color-border); }
 .bot-pnl__value { white-space: nowrap; }
 
+/* ── Secondary bot market cards ───────────────────────────────────────────── */
+.bot-toggle-extra { margin-bottom: 16px; }
+.bot-toggle-extra__trigger { width: 100%; text-align: center; margin-bottom: 8px; }
+.bot-toggle-extra__card { margin-bottom: 8px; }
+.bot-toggle__warning { font-size: 12px; color: #fbbf24; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: var(--radius-sm); padding: 6px 10px; margin-bottom: 6px; }
+
 /* ── Active hedge position panel (HedgeScreen) ─────────────────────────────── */
 .hedge-screen__active-pos { display: flex; flex-direction: column; gap: 6px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px; }
 .hedge-pos__row { display: flex; justify-content: space-between; font-size: 14px; }

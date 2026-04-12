@@ -16,6 +16,7 @@ import type { BotStatus, BotEarnings, LighterPosition, HedgeCurrency } from '../
 import { loadZkKey, saveZkKey, clearZkKey } from '../../wallet/keystore';
 
 interface BotToggleProps {
+  marketId?: number;         // Lighter market ID (77=XMR, 92=XAU, etc.)
   xmrBalance: number;
   hedgePosition?: LighterPosition;
   lighterUsdc?: number;
@@ -34,7 +35,7 @@ function fmtMetal(n: number, sign: string): string {
   if (abs < 1) {
     const grams = abs * TROY_OZ_TO_GRAMS;
     // Adaptive precision: show enough digits to be meaningful
-    const dp = grams >= 1 ? 1 : grams >= 0.1 ? 2 : 3;
+    const dp = grams >= 1 ? 2 : grams >= 0.1 ? 3 : 4;
     return `${sign}${grams.toFixed(dp)} g`;
   }
   return `${sign}${abs.toFixed(2)} oz`;
@@ -83,9 +84,10 @@ function EarningsTable({ earnings, hedgeCurrency, currencyMarkPrice }: {
   );
 }
 
-export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrency = 'USD', currencyMarkPrice = 1, currencyEntryPrice, onActiveChange, onApyChange }: BotToggleProps) {
+export function BotToggle({ marketId, xmrBalance, hedgePosition, lighterUsdc, hedgeCurrency = 'USD', currencyMarkPrice = 1, currencyEntryPrice, onActiveChange, onApyChange }: BotToggleProps) {
   const { xmrKeys, ethWallet, sessionToken, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
-  const botActiveKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
+  const marketSuffix = marketId != null ? `_m${marketId}` : '';
+  const botActiveKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}${marketSuffix}` : `nerodolla_bot_active${marketSuffix}`;
 
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
   const [earnings, setEarnings] = useState<BotEarnings | null>(null);
@@ -103,7 +105,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
 
   async function fetchStatus(): Promise<BotStatus | null> {
     try {
-      const s = await getBotStatus();
+      const s = await getBotStatus(marketId);
       setBotStatus(s);
       if (s.status === 'stopped') stopPolling();
       return s;
@@ -120,7 +122,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
 
   async function fetchEarnings() {
     try {
-      const e = await getBotEarnings();
+      const e = await getBotEarnings(marketId);
       setEarnings(e);
       // Compute realised APY: total earnings / days since first fill, annualised.
       //
@@ -274,11 +276,11 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
     try {
       if (!sessionToken) await ensureSession();
       try {
-        await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+        await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, marketId);
       } catch (err) {
         if (err instanceof Error && err.message.includes('HTTP 401')) {
           await ensureSession();
-          await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+          await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, marketId);
         } else {
           throw err;
         }
@@ -297,7 +299,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
     setBusy(true);
     setLocalError(null);
     try {
-      await stopBot();
+      await stopBot(marketId);
       localStorage.removeItem(botActiveKey);
       stopPolling();
       setBotStatus(prev => prev ? { ...prev, status: 'stopped', openOrderCount: 0 } : null);
@@ -317,7 +319,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
       await saveZkKey(ethWallet.privateKey, newZkPrivKey);
       setSessionToken(sessionToken);
       setProxySessionToken(sessionToken);
-      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance);
+      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, xmrBalance, hedgeCurrency, marketId);
       localStorage.setItem(botActiveKey, 'true');
       await fetchStatus();
       startPolling();
@@ -349,7 +351,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
   return (
     <div className="bot-toggle">
       <div className="bot-toggle__header">
-        <span className="bot-toggle__title">Market Making Bot</span>
+        <span className="bot-toggle__title">Market Making Bot{hedgeCurrency && hedgeCurrency !== 'USD' ? ` · ${hedgeCurrency}-USD` : ''}</span>
         <span className={`bot-toggle__badge ${badgeClass}`}>{badgeLabel}</span>
       </div>
 
@@ -359,19 +361,27 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
           <div className="bot-toggle__stat-row">
             <span>Position</span>
             <span>
-              {botStatus.currentPosition.toFixed(4)} XMR
+              {hedgeCurrency === 'XAU' || hedgeCurrency === 'XAG'
+                ? `${(botStatus.currentPosition * 31.1035).toFixed(3)} g`
+                : hedgeCurrency === 'EUR' ? `€${botStatus.currentPosition.toFixed(2)}`
+                : hedgeCurrency === 'GBP' ? `£${botStatus.currentPosition.toFixed(2)}`
+                : `${botStatus.currentPosition.toFixed(4)} XMR`}
               <span className="bot-toggle__target">
-                {' '}(Target {botStatus.targetXmr.toFixed(4)})
+                {' '}(Target {hedgeCurrency === 'XAU' || hedgeCurrency === 'XAG'
+                  ? `${(botStatus.targetXmr * 31.1035).toFixed(3)} g`
+                  : hedgeCurrency === 'EUR' ? `€${botStatus.targetXmr.toFixed(2)}`
+                  : hedgeCurrency === 'GBP' ? `£${botStatus.targetXmr.toFixed(2)}`
+                  : botStatus.targetXmr.toFixed(4)})
               </span>
             </span>
           </div>
 
           {/* USDC collateral + Available on one line */}
-          {hedgePosition && (
+          {(hedgePosition || botStatus.availableBalance > 0) && (
             <div className="bot-toggle__stat-row">
               <span>USDC</span>
               <span>
-                ${(lighterUsdc ?? 0).toFixed(2)}
+                ${(lighterUsdc ?? botStatus.collateral ?? 0).toFixed(2)}
                 <span className="bot-toggle__target">
                   {' '}(Avail ${botStatus.availableBalance.toFixed(2)})
                 </span>
@@ -393,8 +403,7 @@ export function BotToggle({ xmrBalance, hedgePosition, lighterUsdc, hedgeCurrenc
 
       {!isActive && status !== 'error' && (
         <p className="bot-toggle__desc">
-          Place limit orders on both sides of the XMR/USD perp to earn spread
-          income on top of funding payments.
+          Place limit orders on both sides of the {hedgeCurrency === 'USD' ? 'XMR/USD' : `${hedgeCurrency}/USD`} perp to earn spread income{hedgeCurrency === 'USD' ? ' on top of funding payments' : ''}.
         </p>
       )}
 
