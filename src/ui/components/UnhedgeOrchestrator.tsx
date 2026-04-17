@@ -47,28 +47,32 @@ interface UnhedgePersist {
   withdrawInitiatedAt?: number; // unix ms — when the Lighter withdrawal was first sent
 }
 
-const PERSIST_KEY = 'nerodolla_unhedge';
-
-/** Returns true if a previous unhedge flow is still in progress (survives across renders). */
-export function hasUnhedgeInProgress(): boolean {
-  return !!localStorage.getItem(PERSIST_KEY);
+function persistKey(walletId?: string): string {
+  return walletId ? `nerodolla_unhedge_${walletId}` : 'nerodolla_unhedge';
 }
 
-function loadPersist(): UnhedgePersist | null {
+/** Returns true if a previous unhedge flow is still in progress for this wallet. */
+export function hasUnhedgeInProgress(walletId?: string): boolean {
+  return !!localStorage.getItem(persistKey(walletId));
+}
+
+function loadPersist(walletId?: string): UnhedgePersist | null {
   try {
-    const raw = localStorage.getItem(PERSIST_KEY);
+    const raw = localStorage.getItem(persistKey(walletId));
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
-function savePersist(s: UnhedgePersist) {
-  localStorage.setItem(PERSIST_KEY, JSON.stringify(s));
+function savePersist(s: UnhedgePersist, walletId?: string) {
+  localStorage.setItem(persistKey(walletId), JSON.stringify(s));
 }
-function clearPersist() {
-  localStorage.removeItem(PERSIST_KEY);
+function clearPersist(walletId?: string) {
+  localStorage.removeItem(persistKey(walletId));
 }
 
 interface UnhedgeOrchestratorProps {
   onUnhedged: () => void;
+  /** Active wallet ID — used to isolate persist state per wallet. */
+  walletId?: string;
   /** Recovery mode: position already closed, USDC still in Lighter. Skip close step. */
   recoveryMode?: boolean;
   /** How much USDC is in Lighter (used when recoveryMode=true and hedgeStatus is stale/empty). */
@@ -83,7 +87,7 @@ interface UnhedgeOrchestratorProps {
   onForceEthRecovery?: (amount: number) => void;
 }
 
-export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, ethUsdcRecovery, onForceEthRecovery }: UnhedgeOrchestratorProps) {
+export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availableUsdc, ethUsdcRecovery, onForceEthRecovery }: UnhedgeOrchestratorProps) {
   const { ethWallet, xmrKeys, hedgeStatus } = useWalletStore();
 
   const [step, setStep]                 = useState<UnhedgeStep>('idle');
@@ -91,6 +95,11 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
   const [bridgeDetail, setBridgeDetail] = useState<SwapOrder | null>(null);
   const [errorMsg, setErrorMsg]         = useState<string | null>(null);
   const [elapsedMin, setElapsedMin]     = useState(0);
+
+  // Per-wallet persist wrappers (avoids cross-wallet state leakage)
+  const _load  = () => loadPersist(walletId);
+  const _save  = (s: UnhedgePersist) => savePersist(s, walletId);
+  const _clear = () => clearPersist(walletId);
 
   const pollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -116,7 +125,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
   // Resume in-progress unhedge after PIN re-entry
   useEffect(() => {
     if (!ethWallet) return;
-    const saved = loadPersist();
+    const saved = _load();
     if (!saved) return;
 
     orderIdRef.current     = saved.orderId ?? null;
@@ -144,7 +153,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           } else {
             // USDC already sent — assume relay succeeded, jump to bridge polling
             setStep('bridging');
-            savePersist({ ...saved, step: 'bridging' });
+            _save({ ...saved, step: 'bridging' });
             startBridgePolling(saved.orderId!, saved.provider ?? 'wagyu');
           }
         }).catch(() => {
@@ -207,7 +216,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         depositAddrRef.current = order.depositAddress;
         providerRef.current    = order.provider;
         const valueMicro = BigInt(Math.floor(ethUsdcRecovery * 1e6));
-        savePersist({
+        _save({
           step: 'swapping',
           xmrAddr,
           balanceBefore: ethUsdcRecovery,
@@ -226,7 +235,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         const now = Date.now();
         withdrawAtRef.current = now;
         startElapsedTicker(now);
-        savePersist({ step: 'awaiting_usdc', xmrAddr, balanceBefore, withdrawInitiatedAt: now });
+        _save({ step: 'awaiting_usdc', xmrAddr, balanceBefore, withdrawInitiatedAt: now });
         setStep('awaiting_usdc');
         startUsdcPolling(balanceBefore, xmrAddr);
       } else {
@@ -241,7 +250,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         const now = Date.now();
         withdrawAtRef.current = now;
         startElapsedTicker(now);
-        savePersist({ step: 'awaiting_usdc', xmrAddr, balanceBefore, withdrawInitiatedAt: now });
+        _save({ step: 'awaiting_usdc', xmrAddr, balanceBefore, withdrawInitiatedAt: now });
         setStep('awaiting_usdc');
         startUsdcPolling(balanceBefore, xmrAddr);
       }
@@ -259,7 +268,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
    * is already in flight), silently ignores the error and just restarts polling.
    */
   async function retryWithdraw() {
-    const saved = loadPersist();
+    const saved = _load();
     if (!saved) return;
     setStep('retrying_withdraw');
     try {
@@ -270,7 +279,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
       const initiatedAt = saved.withdrawInitiatedAt ?? Date.now();
       withdrawAtRef.current = initiatedAt;
       startElapsedTicker(initiatedAt);
-      savePersist({ ...saved, step: 'awaiting_usdc', balanceBefore, withdrawInitiatedAt: initiatedAt });
+      _save({ ...saved, step: 'awaiting_usdc', balanceBefore, withdrawInitiatedAt: initiatedAt });
       setStep('awaiting_usdc');
       startUsdcPolling(balanceBefore, saved.xmrAddr);
     } catch (err) {
@@ -307,8 +316,8 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           depositAddrRef.current = order.depositAddress;
           providerRef.current    = order.provider;
           // Persist order details so resume works if app locks between here and relay
-          const saved = loadPersist();
-          if (saved) savePersist({ ...saved, provider: order.provider, orderId: order.orderId, depositAddr: order.depositAddress });
+          const saved = _load();
+          if (saved) _save({ ...saved, provider: order.provider, orderId: order.orderId, depositAddr: order.depositAddress });
           const valueMicro = BigInt(Math.floor(balance * 1e6));
           await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
         }
@@ -324,16 +333,16 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
     if (!ethWallet) return;
     setStep('swapping');
     // Update persist: we're now in swapping but don't have a relay task ID yet
-    const existing = loadPersist();
-    if (existing) savePersist({ ...existing, step: 'swapping' });
+    const existing = _load();
+    if (existing) _save({ ...existing, step: 'swapping' });
     try {
       // Lighter withdrawals land on Ethereum mainnet — sign and relay on mainnet
       const auth = await signTransferAuthorization(ethWallet, depositAddr, valueMicro, 'ethereum');
       const taskId = await relayUsdcTransfer(auth, 'ethereum');
 
       // Persist the relay task ID so we can resume if app locks between here and confirmation
-      const saved = loadPersist();
-      if (saved) savePersist({ ...saved, step: 'swapping', relayTaskId: taskId, relayChain: 'ethereum' });
+      const saved = _load();
+      if (saved) _save({ ...saved, step: 'swapping', relayTaskId: taskId, relayChain: 'ethereum' });
 
       await pollRelayTask(taskId, orderId, provider, 'ethereum');
     } catch (err) {
@@ -361,8 +370,8 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         if (status.taskState === 'ExecSuccess') {
           clearInterval(pollRef.current!);
           pollRef.current = null;
-          const saved = loadPersist();
-          if (saved) savePersist({ ...saved, step: 'bridging' });
+          const saved = _load();
+          if (saved) _save({ ...saved, step: 'bridging' });
           setStep('bridging');
           startBridgePolling(orderId, provider);
         } else if (status.taskState === 'ExecReverted' || status.taskState === 'Cancelled') {
@@ -406,11 +415,11 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
         setBridgeDetail(detail);
         if (detail.status === 'complete') {
           if (pollRef.current) clearInterval(pollRef.current);
-          clearPersist();
+          _clear();
           setStep('complete');
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
-          clearPersist();
+          _clear();
           setErrorMsg(`Bridge ${detail.status}`);
           setStep('error');
         }
@@ -591,7 +600,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
               const balance = await fetchEthUsdcBalanceProxy(ethWallet!.address);
               if (balance > 0.01) {
                 // USDC landed — use force recovery path with a fresh wagyu order
-                clearPersist();
+                _clear();
                 if (onForceEthRecovery) onForceEthRecovery(balance);
                 else onUnhedged();
                 return;
@@ -599,17 +608,17 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
             } catch { /* ignore */ }
             // USDC not yet arrived. If a withdrawal is in transit, keep waiting
             // rather than dumping the user on a confusing empty screen.
-            const saved = loadPersist();
+            const saved = _load();
             if (saved?.withdrawInitiatedAt) {
               // Reset any stale order details and resume polling
               orderIdRef.current     = null;
               depositAddrRef.current = null;
               providerRef.current    = null;
-              savePersist({ ...saved, orderId: undefined, depositAddr: undefined, provider: undefined });
+              _save({ ...saved, orderId: undefined, depositAddr: undefined, provider: undefined });
               startUsdcPolling(saved.balanceBefore, saved.xmrAddr);
               // Stay in awaiting_usdc — nothing to do
             } else {
-              clearPersist();
+              _clear();
               onUnhedged();
             }
           }}
@@ -648,7 +657,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
           style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}
           onClick={() => {
             if (pollRef.current) clearInterval(pollRef.current);
-            clearPersist();
+            _clear();
             setStep('idle');
             setErrorMsg(null);
             onUnhedged();
@@ -678,7 +687,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
   }
 
   // error
-  const persistedState = loadPersist();
+  const persistedState = _load();
   const canRetryWithdraw = !!persistedState && persistedState.step === 'awaiting_usdc';
   return (
     <div className="hedge-orch">
@@ -693,7 +702,7 @@ export function UnhedgeOrchestrator({ onUnhedged, recoveryMode, availableUsdc, e
       )}
       <button
         className="btn btn--ghost hedge-orch__cta"
-        onClick={() => { clearPersist(); setStep('idle'); setErrorMsg(null); }}
+        onClick={() => { _clear(); setStep('idle'); setErrorMsg(null); }}
       >
         Dismiss
       </button>

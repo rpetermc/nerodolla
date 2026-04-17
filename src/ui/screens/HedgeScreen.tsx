@@ -274,6 +274,7 @@ export function HedgeScreen() {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setRecoverInstead(false); refreshHedgeStatus(); }}
+              walletId={activeWalletId}
               recoveryMode
               availableUsdc={hedgeStatus!.lighterUsdc}
             />
@@ -299,24 +300,26 @@ export function HedgeScreen() {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setForcedEthRecovery(0); refreshHedgeStatus(); }}
+              walletId={activeWalletId}
               ethUsdcRecovery={forcedEthRecovery}
             />
           );
         }
 
         // Case 1c: Lighter withdrawal completed, USDC on Ethereum mainnet detected automatically
-        const ethUsdcStuck = !isHedged && ethUsdcBalance > 0.01 && !hasUnhedgeInProgress();
+        const ethUsdcStuck = !isHedged && ethUsdcBalance > 0.01 && !hasUnhedgeInProgress(activeWalletId);
         if (ethUsdcStuck) {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setEthUsdcBalance(0); refreshHedgeStatus(); }}
+              walletId={activeWalletId}
               ethUsdcRecovery={ethUsdcBalance}
             />
           );
         }
 
         // Case 2: Fully hedged, or unhedge in progress (persisted localStorage state)
-        if (isHedged || hasUnhedgeInProgress()) {
+        if (isHedged || hasUnhedgeInProgress(activeWalletId)) {
           return (
             <>
               {/* Static position panel — hidden when bot is active */}
@@ -425,6 +428,7 @@ export function HedgeScreen() {
 
               <UnhedgeOrchestrator
                 onUnhedged={refreshHedgeStatus}
+                walletId={activeWalletId}
                 onForceEthRecovery={(amount) => setForcedEthRecovery(amount)}
               />
             </>
