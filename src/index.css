@@ -1166,6 +1166,8 @@ body {
 .hedge-orch__review-row span:last-child { font-weight: 600; }
 .hedge-orch__spinner-row { display: flex; align-items: center; gap: 12px; font-size: 14px; }
 .hedge-orch__progress { font-size: 12px; color: var(--color-text-muted); }
+.hedge-orch__track-link { display: block; font-size: 12px; margin-top: 6px; color: var(--color-primary); text-decoration: none; }
+.hedge-orch__track-link:hover { text-decoration: underline; }
 .hedge-orch__error { color: var(--color-red); font-size: 13px; }
 .hedge-orch__cta { margin-top: 4px; }
 .hedge-orch__currency-toggle { display: flex; gap: 6px; }

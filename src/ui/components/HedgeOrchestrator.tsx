@@ -1002,6 +1002,16 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         {step === 'bridging' && bridgingNote && (
           <div className="hedge-orch__progress">{bridgingNote}</div>
         )}
+        {step === 'bridging' && bridgeOrderRef.current?.provider === 'trocador' && (
+          <a
+            href={`https://trocador.app/en/trade/${bridgeOrderRef.current.orderId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hedge-orch__track-link"
+          >
+            Track swap on Trocador →
+          </a>
+        )}
         {step === 'bridging' && isResumed && (
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <button

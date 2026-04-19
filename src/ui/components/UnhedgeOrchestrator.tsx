@@ -653,6 +653,16 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
           <div className="swap-flow__spinner" style={{ margin: 0, width: 20, height: 20, borderWidth: 2 }} />
           <span>Sending USDC to swap provider…</span>
         </div>
+        {providerRef.current === 'trocador' && orderIdRef.current && (
+          <a
+            href={`https://trocador.app/en/trade/${orderIdRef.current}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hedge-orch__track-link"
+          >
+            Track swap on Trocador →
+          </a>
+        )}
         <button
           className="btn btn--ghost"
           style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}
@@ -691,6 +701,16 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
         <p className="hedge-orch__progress">
           You can close the app — progress will resume when you return.
         </p>
+        {providerRef.current === 'trocador' && orderIdRef.current && (
+          <a
+            href={`https://trocador.app/en/trade/${orderIdRef.current}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hedge-orch__track-link"
+          >
+            Track swap on Trocador →
+          </a>
+        )}
         <button
           className="btn btn--ghost"
           style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}
