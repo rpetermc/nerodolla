@@ -168,7 +168,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const isNewAccountRef  = useRef(false);
   const signingDataRef   = useRef<LighterSigningData | null>(null);
   const modeRef          = useRef<'simple' | 'bot'>('simple');
-  const currencyRef      = useRef<HedgeCurrency>(currencyPref ?? 'USD');
+  const currencyRef      = useRef<HedgeCurrency>(savedCurrency ?? 'USD');
 
   // Resume in-flight bridge if the app was locked mid-flow, or auto-check when
   // we already know USDC is waiting in Lighter (preCheck prop).
