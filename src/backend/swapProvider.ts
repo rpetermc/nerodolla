@@ -74,6 +74,7 @@ export interface SwapOrder {
   status: SwapOrderStatus;
   confirmations?: number;
   requiredConfirmations?: number;
+  trackingUrl?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -226,6 +227,9 @@ function normalizeTrocadorOrder(trade: TrocadorTrade): SwapOrder {
     status: mapTrocadorStatus(trade.status),
     confirmations: trade.confirmations,
     requiredConfirmations: trade.required_confirmations,
+    trackingUrl: trade.password
+      ? `https://trocador.app/en/trade/${trade.trade_id}/${trade.password}`
+      : undefined,
   };
 }
 

@@ -1002,9 +1002,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         {step === 'bridging' && bridgingNote && (
           <div className="hedge-orch__progress">{bridgingNote}</div>
         )}
-        {step === 'bridging' && bridgeOrderRef.current?.provider === 'trocador' && (
+        {step === 'bridging' && bridgeOrderRef.current?.trackingUrl && (
           <a
-            href={`https://trocador.app/en/trade/${bridgeOrderRef.current.orderId}`}
+            href={bridgeOrderRef.current.trackingUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="hedge-orch__track-link"

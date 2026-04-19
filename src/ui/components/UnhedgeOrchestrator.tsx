@@ -45,6 +45,7 @@ interface UnhedgePersist {
   relayTaskId?: string;
   relayChain?: 'arbitrum' | 'ethereum'; // which chain the relay tx is on
   withdrawInitiatedAt?: number; // unix ms — when the Lighter withdrawal was first sent
+  trackingUrl?: string;
 }
 
 function persistKey(walletId?: string): string {
@@ -123,6 +124,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
   const orderIdRef     = useRef<string | null>(null);
   const depositAddrRef = useRef<string | null>(null);
   const providerRef    = useRef<SwapProvider | null>(null);
+  const trackingUrlRef = useRef<string | null>(null);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -146,6 +148,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
     orderIdRef.current     = saved.orderId ?? null;
     depositAddrRef.current = saved.depositAddr ?? null;
     providerRef.current    = saved.provider ?? null;
+    trackingUrlRef.current = saved.trackingUrl ?? null;
     xmrAddrRef.current     = saved.xmrAddr;
     setStep(saved.step);
 
@@ -232,6 +235,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
         orderIdRef.current     = order.orderId;
         depositAddrRef.current = order.depositAddress;
         providerRef.current    = order.provider;
+        trackingUrlRef.current = order.trackingUrl ?? null;
         const valueMicro = BigInt(Math.floor(ethUsdcRecovery * 1e6));
         _save({
           step: 'swapping',
@@ -240,6 +244,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
           provider:    order.provider,
           orderId:     order.orderId,
           depositAddr: order.depositAddress,
+          trackingUrl: order.trackingUrl,
         });
         await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
       } else if (recoveryMode) {
@@ -332,9 +337,10 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
           orderIdRef.current     = order.orderId;
           depositAddrRef.current = order.depositAddress;
           providerRef.current    = order.provider;
+          trackingUrlRef.current = order.trackingUrl ?? null;
           // Persist order details so resume works if app locks between here and relay
           const saved = _load();
-          if (saved) _save({ ...saved, provider: order.provider, orderId: order.orderId, depositAddr: order.depositAddress });
+          if (saved) _save({ ...saved, provider: order.provider, orderId: order.orderId, depositAddr: order.depositAddress, trackingUrl: order.trackingUrl });
           const valueMicro = BigInt(Math.floor(balance * 1e6));
           await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
         }
@@ -628,10 +634,11 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
             const saved = _load();
             if (saved?.withdrawInitiatedAt) {
               // Reset any stale order details and resume polling
-              orderIdRef.current     = null;
-              depositAddrRef.current = null;
-              providerRef.current    = null;
-              _save({ ...saved, orderId: undefined, depositAddr: undefined, provider: undefined });
+              orderIdRef.current      = null;
+              depositAddrRef.current  = null;
+              providerRef.current     = null;
+              trackingUrlRef.current  = null;
+              _save({ ...saved, orderId: undefined, depositAddr: undefined, provider: undefined, trackingUrl: undefined });
               startUsdcPolling(saved.balanceBefore, saved.xmrAddr);
               // Stay in awaiting_usdc — nothing to do
             } else {
@@ -653,9 +660,9 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
           <div className="swap-flow__spinner" style={{ margin: 0, width: 20, height: 20, borderWidth: 2 }} />
           <span>Sending USDC to swap provider…</span>
         </div>
-        {providerRef.current === 'trocador' && orderIdRef.current && (
+        {providerRef.current === 'trocador' && trackingUrlRef.current && (
           <a
-            href={`https://trocador.app/en/trade/${orderIdRef.current}`}
+            href={trackingUrlRef.current}
             target="_blank"
             rel="noopener noreferrer"
             className="hedge-orch__track-link"
@@ -701,9 +708,9 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
         <p className="hedge-orch__progress">
           You can close the app — progress will resume when you return.
         </p>
-        {providerRef.current === 'trocador' && orderIdRef.current && (
+        {providerRef.current === 'trocador' && trackingUrlRef.current && (
           <a
-            href={`https://trocador.app/en/trade/${orderIdRef.current}`}
+            href={trackingUrlRef.current}
             target="_blank"
             rel="noopener noreferrer"
             className="hedge-orch__track-link"
