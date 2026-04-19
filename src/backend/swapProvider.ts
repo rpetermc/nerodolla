@@ -310,11 +310,15 @@ export async function createOrder(
     return normalizeWagyuOrder(wo);
   }
 
-  // trocador
-  const rate = quote._providerData as TrocadorRate;
+  // trocador — fetch a fresh rate immediately before creating the trade,
+  // because Trocador trade_ids expire within seconds of issuance.
+  const freshRate = await getRate(from, to, quote.fromAmount);
   const trade = await createTrade(
-    rate.trade_id,
+    freshRate.trade_id,
+    from,
+    to,
     toAddress,
+    quote.fromAmount,
     refundAddress,
   );
   return normalizeTrocadorOrder(trade);
@@ -399,9 +403,9 @@ export async function createHedgeOrder(
     return normalizeWagyuOrder(wo);
   }
 
-  // trocador
-  const rate = quote._providerData as TrocadorRate;
-  const trade = await createTrade(rate.trade_id, toAddress, refundAddress);
+  // trocador — fetch a fresh rate (trade_ids expire within seconds)
+  const freshRate = await getRate(XMR_TOKEN, USDC_ARB_TOKEN, quote.fromAmount);
+  const trade = await createTrade(freshRate.trade_id, XMR_TOKEN, USDC_ARB_TOKEN, toAddress, quote.fromAmount, refundAddress);
   const order = normalizeTrocadorOrder(trade);
   // Convert human-readable XMR to picoXMR for transferXmr compatibility
   order.depositAmount = xmrToAtomic(order.depositAmount);

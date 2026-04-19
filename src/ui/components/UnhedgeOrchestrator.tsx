@@ -51,13 +51,28 @@ function persistKey(walletId?: string): string {
   return walletId ? `nerodolla_unhedge_${walletId}` : 'nerodolla_unhedge';
 }
 
+/** Migrate legacy global key → per-wallet key (one-time, idempotent). */
+function migrateLegacyPersist(walletId?: string) {
+  if (!walletId) return;
+  const LEGACY_KEY = 'nerodolla_unhedge';
+  const legacy = localStorage.getItem(LEGACY_KEY);
+  if (!legacy) return;
+  // Only migrate if the wallet-specific key doesn't already exist
+  if (!localStorage.getItem(persistKey(walletId))) {
+    localStorage.setItem(persistKey(walletId), legacy);
+  }
+  localStorage.removeItem(LEGACY_KEY);
+}
+
 /** Returns true if a previous unhedge flow is still in progress for this wallet. */
 export function hasUnhedgeInProgress(walletId?: string): boolean {
+  migrateLegacyPersist(walletId);
   return !!localStorage.getItem(persistKey(walletId));
 }
 
 function loadPersist(walletId?: string): UnhedgePersist | null {
   try {
+    migrateLegacyPersist(walletId);
     const raw = localStorage.getItem(persistKey(walletId));
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
@@ -209,6 +224,8 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
       if (ethUsdcRecovery != null) {
         // 2a. ETH mainnet recovery: USDC already on Ethereum mainnet — get best rate
         // and relay immediately. Use ethUsdcRecovery prop directly (already fetched via proxy).
+        // Persist early so switching wallets mid-flow resumes instead of showing idle.
+        _save({ step: 'swapping', xmrAddr, balanceBefore: ethUsdcRecovery });
         const humanUsdc = ethUsdcRecovery.toFixed(2);
         const freshQuote = await getBestQuote(USDC_ETH_TOKEN, XMR_TOKEN, humanUsdc);
         const order = await providerCreateOrder(freshQuote, USDC_ETH_TOKEN, XMR_TOKEN, xmrAddr, ethWallet.address);
@@ -631,9 +648,31 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
 
   if (step === 'swapping') {
     return (
-      <div className="hedge-orch__spinner-row">
-        <div className="swap-flow__spinner" style={{ margin: 0, width: 20, height: 20, borderWidth: 2 }} />
-        <span>Sending USDC to swap provider…</span>
+      <div className="hedge-orch">
+        <div className="hedge-orch__spinner-row">
+          <div className="swap-flow__spinner" style={{ margin: 0, width: 20, height: 20, borderWidth: 2 }} />
+          <span>Sending USDC to swap provider…</span>
+        </div>
+        <button
+          className="btn btn--ghost"
+          style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}
+          onClick={async () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+            _clear();
+            setErrorMsg(null);
+            try {
+              const balance = await fetchEthUsdcBalanceProxy(ethWallet!.address);
+              if (balance > 0.01 && onForceEthRecovery) {
+                onForceEthRecovery(balance);
+                return;
+              }
+            } catch { /* ignore */ }
+            setStep('idle');
+            onUnhedged();
+          }}
+        >
+          Stuck? Dismiss &amp; retry
+        </button>
       </div>
     );
   }

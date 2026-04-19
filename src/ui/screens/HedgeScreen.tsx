@@ -3,7 +3,7 @@ import { useWalletStore } from '../../store/wallet';
 import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
-import { TopUpFlow } from '../components/TopUpFlow';
+import { CollateralAdjust } from '../components/CollateralAdjust';
 import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, AVAILABLE_MARKETS, CURRENCY_TO_MARKET_ID } from '../../backend/lighter';
 import type { LighterMarketInfo, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 
@@ -370,7 +370,15 @@ export function HedgeScreen() {
                 />
               )}
 
-              {isHedged && <TopUpFlow onTopUpComplete={refreshHedgeStatus} />}
+              {isHedged && hedgeStatus?.position && (
+                <CollateralAdjust
+                  onComplete={refreshHedgeStatus}
+                  lighterUsdc={hedgeStatus.lighterUsdc ?? 0}
+                  marginUsed={hedgeStatus.position.marginUsed}
+                  markPrice={hedgeStatus.position.markPrice}
+                  positionSize={hedgeStatus.position.size}
+                />
+              )}
 
               {/* Hedge switch */}
               {isHedged && !botActive && (

@@ -195,20 +195,36 @@ export async function getRate(
 }
 
 /**
- * Create a trade using a rate_id from getRate.
+ * Create a trade using a trade_id from getRate.
  * Returns deposit details — send funds to address_provider.
  *
- * @param rateId        The rate_id from a TrocadorRate
+ * @param tradeId       The trade_id from a TrocadorRate
+ * @param from          Source token (needed for ticker_from/network_from)
+ * @param to            Destination token (needed for ticker_to/network_to)
  * @param address       Destination address for the output token
+ * @param amountFrom   Human-readable amount (e.g. "24.41")
  * @param refundAddress Address for refunds if the trade fails
  */
 export async function createTrade(
   tradeId: string,
+  from: SwapToken,
+  to: SwapToken,
   address: string,
+  amountFrom: string,
   refundAddress?: string,
 ): Promise<TrocadorTrade> {
+  const fromParams = toTrocadorParams(from);
+  const toParams = toTrocadorParams(to);
+  if (!fromParams || !toParams) {
+    throw new Error(`Unsupported token pair for Trocador: ${from.symbol} → ${to.symbol}`);
+  }
   const params: Record<string, string> = {
     trade_id: tradeId,
+    ticker_from:  fromParams.ticker,
+    ticker_to:    toParams.ticker,
+    network_from: fromParams.network,
+    network_to:   toParams.network,
+    amount_from:  amountFrom,
     address: address,
   };
   if (refundAddress) params.refund_address = refundAddress;
