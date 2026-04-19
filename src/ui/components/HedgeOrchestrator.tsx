@@ -481,17 +481,10 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           setErrorMsg(`Bridge ${detail.status}. Your XMR balance was not affected.`);
           setStep('error');
         }
-      } catch (err) {
-        // If provider returns 404 the order doesn't exist — clear state immediately
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('404')) {
-          if (pollRef.current) clearInterval(pollRef.current);
-          pollRef.current = null;
-          clearHedgeState(activeWalletId);
-          setErrorMsg('Previous bridge order not found. Your XMR balance was not affected.');
-          setStep('error');
-        }
-        // Otherwise a transient network error — keep polling
+      } catch {
+        // Transient network error or provider API issue — keep polling.
+        // Do NOT clear state on 404 — Trocador's API sometimes 302-redirects
+        // to a broken /en/ path that returns 404 even for valid trades.
       }
     };
     tick(); // immediate first check (especially important on resume)
