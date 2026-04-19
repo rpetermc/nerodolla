@@ -230,9 +230,12 @@ export function HomeScreen() {
       const store = useWalletStore.getState();
       store.setHedgeStatus(null);
       store.setXmrInfo(null);
+      store.setTransactions([]);
       store.setLighterMarket(null);
       store.setSessionToken(null);
       store.setReceiveAddress(null, 0);
+      store.setEthBalance('');
+      store.setUsdcBalance('');
 
       // Restore cached state if available
       const cached = loadWalletCache(walletId);
@@ -246,8 +249,10 @@ export function HomeScreen() {
       } : null);
       if (cached) {
         if (cached.xmrInfo) store.setXmrInfo(cached.xmrInfo);
+        if (cached.transactions?.length) store.setTransactions(cached.transactions);
         if (cached.hedgeStatus) store.setHedgeStatus(cached.hedgeStatus);
         if (cached.lighterMarket) store.setLighterMarket(cached.lighterMarket);
+        if (cached.ethBalanceEth) store.setEthBalance(cached.ethBalanceEth);
         if (cached.usdcBalance) store.setUsdcBalance(cached.usdcBalance);
         if (cached.sessionToken) {
           store.setSessionToken(cached.sessionToken);
