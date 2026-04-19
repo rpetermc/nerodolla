@@ -303,8 +303,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       try {
         const q = await getHedgeBestQuote(amt);
         setQuote(q);
-      } catch {
-        // Non-fatal — quote display is best-effort
+      } catch (err) {
+        console.warn('[HedgeOrchestrator] quote fetch failed:', err);
+        setQuote(null);
       }
     }, 500);
   }
@@ -598,6 +599,13 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       setStep('error');
     }
   }
+
+  // ── Auto-retry quote if slider is visible but quote is null ────────────────
+  useEffect(() => {
+    if (step === 'slider' && !quote && xmrFromPct >= parseFloat(MIN_SWAP_XMR)) {
+      fetchQuote(xmrFromPct.toFixed(6));
+    }
+  }, [step, quote, xmrFromPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Validation ──────────────────────────────────────────────────────────────
 
@@ -898,9 +906,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         <button
           className="btn btn--primary hedge-orch__cta"
           onClick={() => setStep('confirming')}
-          disabled={!amountValid}
+          disabled={!amountValid || !quote}
         >
-          Review &amp; confirm
+          {!quote && amountValid ? 'Fetching quote…' : 'Review & confirm'}
         </button>
       </div>
     );
