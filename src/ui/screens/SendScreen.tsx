@@ -8,11 +8,12 @@ import { loadKeystore } from '../../wallet/keystore';
 type Step = 'input' | 'confirm' | 'sending' | 'success' | 'error';
 
 export function SendScreen() {
-  const { xmrInfo, xmrKeys, walletCreatedHeight, navigate } = useWalletStore();
+  const { xmrInfo, xmrKeys, walletCreatedHeight, navigate, activeWalletId } = useWalletStore();
 
   // ── Input state ──────────────────────────────────────────────────────────────
   const [destAddress, setDestAddress] = useState('');
   const [amountXmr, setAmountXmr] = useState('');
+  const [isSweepAll, setIsSweepAll] = useState(false);
   const [addressError, setAddressError] = useState('');
   const [showWebNote, setShowWebNote] = useState(false);
   const [scanError, setScanError] = useState('');
@@ -91,6 +92,7 @@ export function SendScreen() {
   // ── MAX button ────────────────────────────────────────────────────────────────
   function handleMax() {
     setAmountXmr(spendableXmr);
+    setIsSweepAll(true);
   }
 
   // ── Validate + fetch fee → confirm ────────────────────────────────────────────
@@ -133,7 +135,7 @@ export function SendScreen() {
     try {
       // loadKeystore returns mnemonic; we need the spend key from xmrKeys (already derived).
       // We use loadKeystore purely to verify the PIN — if it doesn't throw, PIN is correct.
-      await loadKeystore(enteredPin);
+      await loadKeystore(enteredPin, activeWalletId ?? undefined);
       spendKey = xmrKeys.spendKeyPrivate;
     } catch {
       setPinError('Incorrect PIN');
@@ -145,14 +147,22 @@ export function SendScreen() {
     setStep('sending');
 
     try {
-      const amountAtomic = xmrToAtomic(amountXmr);
+      const amountAtomic = BigInt(xmrToAtomic(amountXmr));
+      const fee = BigInt(estimatedFee || '0');
+      // Use sweep_all if MAX was clicked OR if amount+fee covers the full balance
+      // (the latter catches edge cases where user typed the exact max amount manually)
+      const isSweep = isSweepAll || amountAtomic + fee >= spendableBalance;
+
+      if (isSweep && amountAtomic <= fee) throw new Error('Amount too small to cover the network fee');
+
       const result = await transferXmr(
         xmrKeys.primaryAddress,
         xmrKeys.viewKeyPrivate,
         spendKey,
         destAddress,
-        amountAtomic,
+        amountAtomic.toString(),
         walletCreatedHeight ?? undefined,
+        isSweep,
       );
       setTxHash(result.txHash);
       setActualFee(result.fee);
@@ -369,7 +379,7 @@ export function SendScreen() {
               className="form-input"
               placeholder="0.000000"
               value={amountXmr}
-              onChange={(e) => setAmountXmr(e.target.value)}
+              onChange={(e) => { setAmountXmr(e.target.value); setIsSweepAll(false); }}
               min="0"
               step="0.000001"
             />

@@ -403,6 +403,7 @@ export async function transferXmr(
   destAddress: string,
   amount: string,
   restoreHeight?: number,
+  sweepAll?: boolean,
 ): Promise<{ txHash: string; amount: string; fee: string }> {
   const res = await fetch(`${proxyBase()}/lws/transfer`, {
     method: 'POST',
@@ -414,6 +415,7 @@ export async function transferXmr(
       dest_address: destAddress,
       amount,
       ...(restoreHeight != null ? { restore_height: restoreHeight } : {}),
+      ...(sweepAll ? { sweep_all: true } : {}),
     }),
   });
   if (!res.ok) {
