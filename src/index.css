@@ -948,6 +948,38 @@ body {
   gap: 8px;
   margin-bottom: 12px;
 }
+.swap-screen__provider-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.swap-screen__provider-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.swap-screen__provider-badge--off {
+  opacity: 0.4;
+}
+.swap-screen__provider-badge input {
+  margin: 0;
+  cursor: pointer;
+}
+.swap-screen__provider-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: contain;
+}
 .swap-screen__provider-sep {
   color: var(--color-text-muted);
   font-size: 14px;
