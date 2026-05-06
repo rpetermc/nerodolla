@@ -10,7 +10,7 @@ import { getHedgeStatus, getXmrMarketInfo, closeHedgeAndWithdraw, setActiveSessi
 import { fetchArbUsdcBalance } from '../../backend/wagyu';
 import { initWasmWallet, syncWasmWallet, getWasmAddressInfo, getWasmTxs } from '../../backend/wasm-wallet';
 import { AddWalletFlow } from '../components/AddWalletFlow';
-import { loadKeystore, getWalletList } from '../../wallet/keystore';
+import { loadKeystore } from '../../wallet/keystore';
 import { mnemonicToSeed, xmrSeedFromMaster, ethSeedFromMaster } from '../../wallet/seed';
 import { deriveXmrKeys } from '../../wallet/xmr';
 import { deriveEthWallet } from '../../wallet/eth';
@@ -37,8 +37,6 @@ export function HomeScreen() {
     setHedgeLoading,
     setKeys,
     setActiveWalletId,
-    setWalletList,
-    setSessionToken,
     navigate,
   } = useWalletStore();
 
@@ -56,7 +54,7 @@ export function HomeScreen() {
   // Find active wallet label
   const activeWallet = walletList.find(w => w.id === activeWalletId);
   const walletLabel = activeWallet?.label ?? 'Wallet';
-  const hasMultipleWallets = walletList.length > 1 || walletList.length === 1;
+
 
   const sync = useCallback(async () => {
     // Read keys and wallet ID from the store at call time (not closure) to

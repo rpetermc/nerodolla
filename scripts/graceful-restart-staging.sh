@@ -30,7 +30,6 @@ error() { echo -e "${RED}[$(date '+%H:%M:%S')]${NC} $1"; }
 # Backup current Caddy config
 log "Backing up Caddy config..."
 sudo cp "$CADDY_CONFIG" "$CADDY_BACKUP"
-sudo chown deploy:deploy "$CADDY_BACKUP"
 
 # Create maintenance mode Caddy config for staging
 log "Enabling maintenance mode for staging.nerohedge.app..."

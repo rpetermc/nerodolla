@@ -4,7 +4,7 @@ import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
 import { CollateralAdjust } from '../components/CollateralAdjust';
-import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, AVAILABLE_MARKETS, CURRENCY_TO_MARKET_ID } from '../../backend/lighter';
+import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID } from '../../backend/lighter';
 import type { LighterMarketInfo, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 
 const WARN_MARGIN_PCT = 20;
@@ -73,37 +73,6 @@ function RebalanceBanner({ drift, xmrBalance, onDone }: {
   );
 }
 
-function SecondaryMarkets({ primaryMarketId, xmrBalance }: {
-  primaryMarketId: number;
-  xmrBalance: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const secondaryMarkets = AVAILABLE_MARKETS.filter(m => m.marketId !== primaryMarketId);
-
-  return (
-    <div className="bot-toggle-extra">
-      <button
-        className="btn btn--ghost btn--sm bot-toggle-extra__trigger"
-        onClick={() => setExpanded(!expanded)}
-      >
-        {expanded ? 'Hide extra markets' : `More markets (${secondaryMarkets.length})`}
-      </button>
-      {expanded && secondaryMarkets.map(m => (
-        <div key={m.marketId} className="bot-toggle-extra__card">
-          {m.warning && (
-            <div className="bot-toggle__warning">{m.warning}</div>
-          )}
-          <BotToggle
-            marketId={m.marketId}
-            xmrBalance={xmrBalance}
-            hedgeCurrency={m.currency}
-          />
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export function HedgeScreen() {
   const {
     navigate,
@@ -128,6 +97,7 @@ export function HedgeScreen() {
   const isHedged = hedgeStatus?.isHedged ?? false;
   const [botActive, setBotActive] = useState(false);
   const [realisedApy, setRealisedApy] = useState<number | null>(null);
+  const [currencyBotApy, setCurrencyBotApy] = useState<number | null>(null);
   const [ethUsdcBalance, setEthUsdcBalance] = useState<number>(0);
   const [forcedEthRecovery, setForcedEthRecovery] = useState<number>(0);
   const [recoverInstead, setRecoverInstead] = useState(false);
@@ -244,7 +214,14 @@ export function HedgeScreen() {
             <div className="market-stat market-stat--green">
               <span className="market-stat__label">APY</span>
               <span className="market-stat__value">
-                {realisedApy !== null ? `${realisedApy.toFixed(1)}%` : '…'}
+                {(() => {
+                  // For multi-currency hedges, show combined APY from both bots
+                  if (effectiveHedgeCurrency !== 'USD' && currencyBotApy !== null && realisedApy !== null) {
+                    const combined = (realisedApy + currencyBotApy) / 2;
+                    return `${combined.toFixed(1)}%`;
+                  }
+                  return realisedApy !== null ? `${realisedApy.toFixed(1)}%` : '…';
+                })()}
               </span>
             </div>
           ) : (
@@ -264,17 +241,19 @@ export function HedgeScreen() {
         // or from a position that was closed externally via the Lighter UI.
         // Default: offer to open the hedge (HedgeOrchestrator handles usdc_ready).
         // Escape hatch: user can tap "Recover as XMR" to swap back instead.
-        const primaryMarketId = CURRENCY_TO_MARKET_ID[effectiveHedgeCurrency] ?? 77;
+        const currencyMarketId = CURRENCY_TO_MARKET_ID[effectiveHedgeCurrency] ?? 77;
         // Check both new per-market key and legacy key for backward compat
-        const botActiveKeyNew = activeWalletId ? `nerodolla_bot_active_${activeWalletId}_m${primaryMarketId}` : `nerodolla_bot_active_m${primaryMarketId}`;
+        // Primary bot is always XMR-USD (market 77); currency bot is secondary
+        const botActiveKeyXmr = activeWalletId ? `nerodolla_bot_active_${activeWalletId}_m77` : `nerodolla_bot_active_m77`;
+        const botActiveKeyCurr = activeWalletId ? `nerodolla_bot_active_${activeWalletId}_m${currencyMarketId}` : `nerodolla_bot_active_m${currencyMarketId}`;
         const botActiveKeyLegacy = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
-        const botLaunched = localStorage.getItem(botActiveKeyNew) === 'true' || localStorage.getItem(botActiveKeyLegacy) === 'true';
+        const botLaunched = localStorage.getItem(botActiveKeyXmr) === 'true' || localStorage.getItem(botActiveKeyCurr) === 'true' || localStorage.getItem(botActiveKeyLegacy) === 'true';
         const stuckUsdc = !isHedged && !botLaunched && (hedgeStatus?.lighterUsdc ?? 0) > 0.01;
         if (stuckUsdc && recoverInstead) {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setRecoverInstead(false); refreshHedgeStatus(); }}
-              walletId={activeWalletId}
+              walletId={activeWalletId ?? undefined}
               recoveryMode
               availableUsdc={hedgeStatus!.lighterUsdc}
             />
@@ -300,14 +279,14 @@ export function HedgeScreen() {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setForcedEthRecovery(0); refreshHedgeStatus(); }}
-              walletId={activeWalletId}
+              walletId={activeWalletId ?? undefined}
               ethUsdcRecovery={forcedEthRecovery}
             />
           );
         }
 
         // Case 1c: Lighter withdrawal completed, USDC on Ethereum mainnet detected automatically
-        const ethUsdcStuck = !isHedged && ethUsdcBalance > 0.01 && !hasUnhedgeInProgress(activeWalletId);
+        const ethUsdcStuck = !isHedged && ethUsdcBalance > 0.01 && !hasUnhedgeInProgress(activeWalletId ?? undefined);
         if (ethUsdcStuck) {
           return (
             <UnhedgeOrchestrator
@@ -319,7 +298,7 @@ export function HedgeScreen() {
         }
 
         // Case 2: Fully hedged, or unhedge in progress (persisted localStorage state)
-        if (isHedged || hasUnhedgeInProgress(activeWalletId)) {
+        if (isHedged || hasUnhedgeInProgress(activeWalletId ?? undefined)) {
           return (
             <>
               {/* Static position panel — hidden when bot is active */}
@@ -413,30 +392,37 @@ export function HedgeScreen() {
                 </div>
               )}
 
+              {/* XMR-USD bot — always shown when hedged (the short hedge) */}
               {isHedged && (
                 <BotToggle
-                  marketId={primaryMarketId}
+                  marketId={77}
+                  marketSymbol="XMR-USD"
                   xmrBalance={xmrBalance}
                   hedgePosition={hedgeStatus?.position}
                   lighterUsdc={hedgeStatus?.lighterUsdc}
-                  hedgeCurrency={effectiveHedgeCurrency}
-                  currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
-                  currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
+                  hedgeCurrency="USD"
                   onActiveChange={setBotActive}
                   onApyChange={setRealisedApy}
                 />
               )}
 
-              {isHedged && (
-                <SecondaryMarkets
-                  primaryMarketId={primaryMarketId}
+              {/* Currency-USD bot — shown for non-USD hedges (the long leg) */}
+              {isHedged && effectiveHedgeCurrency !== 'USD' && (
+                <BotToggle
+                  marketId={currencyMarketId}
+                  marketSymbol={`${effectiveHedgeCurrency}-USD`}
                   xmrBalance={xmrBalance}
+                  lighterUsdc={hedgeStatus?.lighterUsdc}
+                  hedgeCurrency={effectiveHedgeCurrency}
+                  currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
+                  currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
+                  onApyChange={setCurrencyBotApy}
                 />
               )}
 
               <UnhedgeOrchestrator
                 onUnhedged={refreshHedgeStatus}
-                walletId={activeWalletId}
+                walletId={activeWalletId ?? undefined}
                 onForceEthRecovery={(amount) => setForcedEthRecovery(amount)}
               />
             </>
@@ -453,12 +439,11 @@ export function HedgeScreen() {
                 Your position will appear here once the first trade fills.
               </div>
               <BotToggle
-                marketId={primaryMarketId}
+                marketId={77}
+                marketSymbol="XMR-USD"
                 xmrBalance={xmrBalance}
                 lighterUsdc={hedgeStatus?.lighterUsdc}
-                hedgeCurrency={effectiveHedgeCurrency}
-                currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
-                currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
+                hedgeCurrency="USD"
                 onActiveChange={setBotActive}
                 onApyChange={setRealisedApy}
               />

@@ -25,7 +25,7 @@ const PFN_OPTIONS = [
 ];
 
 export function SettingsScreen() {
-  const { navigate, lock, wcSession, setWcSession, activeWalletId, walletList, setWalletList, xmrKeys } = useWalletStore();
+  const { navigate, lock, wcSession, setWcSession, activeWalletId, walletList, setWalletList } = useWalletStore();
   const {
     xmrSyncMode, remoteLwsUrl, nodeUrl, lighterProxyUrl, network, ethRpcUrl, updateSettings,
   } = useSettingsStore();

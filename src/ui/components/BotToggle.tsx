@@ -17,6 +17,7 @@ import { loadZkKey, saveZkKey, clearZkKey } from '../../wallet/keystore';
 
 interface BotToggleProps {
   marketId?: number;         // Lighter market ID (77=XMR, 92=XAU, etc.)
+  marketSymbol?: string;     // Display symbol, e.g. "XMR-USD", "EUR-USD"
   xmrBalance: number;
   hedgePosition?: LighterPosition;
   lighterUsdc?: number;
@@ -52,7 +53,7 @@ function fmtCurrency(n: number, currency: HedgeCurrency, decimals = 2): string {
 function EarningsTable({ earnings, hedgeCurrency, currencyMarkPrice }: {
   earnings: BotEarnings;
   hedgeCurrency: HedgeCurrency;
-  currencyMarkPrice: number; // 1 for USD, XAU/USD price for gold, etc.
+  currencyMarkPrice: number;
 }) {
   const safeMarkPrice = currencyMarkPrice != null && currencyMarkPrice > 0 ? currencyMarkPrice : 1;
   const conv = hedgeCurrency === 'USD' ? 1 : 1 / safeMarkPrice;
@@ -80,11 +81,38 @@ function EarningsTable({ earnings, hedgeCurrency, currencyMarkPrice }: {
           </span>
         ))}
       </div>
+      {/* Breakdown tooltip row */}
+      <div className="bot-pnl__breakdown" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: 4, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <span>Spread: {fmtCurrency(earnings.spreadTotal * conv, hedgeCurrency)}</span>
+        <span>Funding: {fmtCurrency(earnings.fundingTotal * conv, hedgeCurrency)}</span>
+        {earnings.unrealizedPnl !== 0 && (
+          <span style={{ color: earnings.unrealizedPnl >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
+            Unrealized: {fmtCurrency(earnings.unrealizedPnl * conv, hedgeCurrency)}
+          </span>
+        )}
+      </div>
+      {/* TWR / MWR */}
+      {(earnings.twrAnnualizedPct != null || earnings.mwrAnnualizedPct != null) && (
+        <div className="bot-pnl__returns" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: 2 }}>
+          {earnings.mwrAnnualizedPct != null && (
+            <span>APY (MWR): {earnings.mwrAnnualizedPct.toFixed(1)}%</span>
+          )}
+          {earnings.twrAnnualizedPct != null && (
+            <span style={{ marginLeft: 8 }}>TWR: {earnings.twrAnnualizedPct.toFixed(1)}%</span>
+          )}
+        </div>
+      )}
+      {/* Note when windowed spread is reset */}
+      {earnings.daysActive > 1 && earnings.spread1d === 0 && earnings.spreadTotal !== 0 && (
+        <div className="bot-pnl__note" style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: 4, fontStyle: 'italic' }}>
+          24h/7d/30d spread recalculated from exchange data. Windowed values appear once 24h+ of snapshots accumulate.
+        </div>
+      )}
     </div>
   );
 }
 
-export function BotToggle({ marketId, xmrBalance, hedgePosition, lighterUsdc, hedgeCurrency = 'USD', currencyMarkPrice = 1, currencyEntryPrice, onActiveChange, onApyChange }: BotToggleProps) {
+export function BotToggle({ marketId, marketSymbol, xmrBalance, hedgePosition, lighterUsdc, hedgeCurrency = 'USD', currencyMarkPrice = 1, currencyEntryPrice, onActiveChange, onApyChange }: BotToggleProps) {
   const { xmrKeys, ethWallet, sessionToken, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
   const marketSuffix = marketId != null ? `_m${marketId}` : '';
   const botActiveKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}${marketSuffix}` : `nerodolla_bot_active${marketSuffix}`;
@@ -124,19 +152,10 @@ export function BotToggle({ marketId, xmrBalance, hedgePosition, lighterUsdc, he
     try {
       const e = await getBotEarnings(marketId);
       setEarnings(e);
-      // Compute realised APY: total earnings / days since first fill, annualised.
+      // Compute realised APY using dynamic average invested capital.
       //
-      // Capital base: use the hedge entry value (entryPrice * size) as a stable
-      // denominator. Current lighterUsdc fluctuates with top-ups/withdrawals and
-      // unrealized PnL, which causes wild APY swings. The entry value represents
-      // the capital that was actually deployed when the hedge was opened.
-      //
-      // Total capital = XMR value at entry price + USDC collateral posted.
-      // Since the hedge is delta-neutral, XMR value ≈ short notional ≈ entryPrice * size.
-      // The total deployed capital is roughly: short notional + collateral = short notional / (1 - margin%).
-      // Simplification: use short notional + original collateral ≈ 2 * short notional for typical 50/50 split,
-      // BUT the cleanest approach is: total wallet value at entry = entryPrice * xmrBalance + original collateral.
-      // We approximate original collateral as lighterUsdc - unrealizedPnl (strips out PnL drift).
+      // If the backend provides MWR (Money-Weighted Return), use that directly.
+      // Otherwise fall back to pnlTotal / daysActive / avgInvestedCapitalUsd.
       const markPrice = lighterMarket?.markPrice ?? 0;
       const fundingApy = lighterMarket?.annualizedFundingPct
         ?? hedgePosition?.annualizedFundingPct ?? null;
@@ -148,26 +167,34 @@ export function BotToggle({ marketId, xmrBalance, hedgePosition, lighterUsdc, he
       if (daysActive < 1 || markPrice <= 0) {
         onApyChange?.(fundingApy);
       } else {
-        const totalEarned = e.pnlTotal;
-
-        // Use proxy-provided initial capital when available (most accurate),
-        // otherwise fall back to entry-price-based calculation.
-        let capitalBase = botStatus?.initialCapitalUsd ?? 0;
-        if (capitalBase <= 0) {
-          const entryPrice = hedgePosition?.entryPrice ?? markPrice;
-          const unrealizedPnl = hedgePosition?.unrealizedPnl ?? 0;
-          const originalCollateral = Math.max((lighterUsdc ?? 0) - unrealizedPnl, 0);
-          capitalBase = xmrBalance * entryPrice + originalCollateral;
-        }
-
-        if (capitalBase > 0) {
-          let apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
-          // Adjust APY for hedge currency movement: if hedged into XAU and gold
-          // appreciated vs USD, the USD-denominated APY overstates the gold return.
-          if (hedgeCurrency !== 'USD' && currencyEntryPrice && currencyEntryPrice > 0 && currencyMarkPrice > 0) {
-            apy *= currencyEntryPrice / currencyMarkPrice;
+        // Prefer backend-computed MWR (handles deposits/withdrawals correctly)
+        if (e.mwrAnnualizedPct != null) {
+          onApyChange?.(e.mwrAnnualizedPct);
+        } else {
+          const totalEarned = e.pnlTotal;
+          // Use dynamic average invested capital instead of frozen initialCapitalUsd
+          let capitalBase = e.avgInvestedCapitalUsd > 0
+            ? e.avgInvestedCapitalUsd
+            : botStatus?.avgInvestedCapitalUsd ?? 0;
+          // Fallback for legacy data
+          if (capitalBase <= 0) {
+            capitalBase = botStatus?.initialCapitalUsd ?? 0;
           }
-          onApyChange?.(apy);
+          if (capitalBase <= 0) {
+            const entryPrice = hedgePosition?.entryPrice ?? markPrice;
+            const unrealizedPnl = hedgePosition?.unrealizedPnl ?? 0;
+            const originalCollateral = Math.max((lighterUsdc ?? 0) - unrealizedPnl, 0);
+            capitalBase = xmrBalance * entryPrice + originalCollateral;
+          }
+
+          if (capitalBase > 0) {
+            let apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
+            // Adjust APY for hedge currency movement
+            if (hedgeCurrency !== 'USD' && currencyEntryPrice && currencyEntryPrice > 0 && currencyMarkPrice > 0) {
+              apy *= currencyEntryPrice / currencyMarkPrice;
+            }
+            onApyChange?.(apy);
+          }
         }
       }
     } catch { /* non-critical */ }
@@ -351,7 +378,7 @@ export function BotToggle({ marketId, xmrBalance, hedgePosition, lighterUsdc, he
   return (
     <div className="bot-toggle">
       <div className="bot-toggle__header">
-        <span className="bot-toggle__title">Market Making Bot{hedgeCurrency && hedgeCurrency !== 'USD' ? ` · ${hedgeCurrency}-USD` : ''}</span>
+        <span className="bot-toggle__title">Market Making Bot{marketSymbol ? ` · ${marketSymbol}` : ''}</span>
         <span className={`bot-toggle__badge ${badgeClass}`}>{badgeLabel}</span>
       </div>
 

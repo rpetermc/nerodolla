@@ -4,7 +4,7 @@
  * address prefixes, and an "Add Wallet" button.
  */
 import { useState } from 'react';
-import { useWalletStore, useSettingsStore } from '../../store/wallet';
+import { useWalletStore } from '../../store/wallet';
 import { getWalletList, updateWalletLabel, removeWallet as removeWalletFromStorage, type WalletEntry } from '../../wallet/keystore';
 import { setProxySessionToken } from '../../backend/lighter';
 

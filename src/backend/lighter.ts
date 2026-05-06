@@ -644,6 +644,7 @@ export interface BotStatus {
   iteration: number;
   startedAt: number;
   initialCapitalUsd: number;
+  avgInvestedCapitalUsd: number;
 }
 
 /** Start the market-making bot for the current session. */
@@ -715,6 +716,22 @@ export interface BotEarnings {
   pnl30d: number;
   pnlTotal: number;
   firstSnapshotAt: number; // Unix seconds of first account value snapshot (0 = none)
+  daysActive: number;
+  // Breakdown
+  spread1d: number;
+  spread7d: number;
+  spread30d: number;
+  spreadTotal: number;
+  funding1d: number;
+  funding7d: number;
+  funding30d: number;
+  fundingTotal: number;
+  unrealizedPnl: number;
+  // Capital & Returns
+  initialCapitalUsd: number;
+  avgInvestedCapitalUsd: number;
+  twrAnnualizedPct: number | null;
+  mwrAnnualizedPct: number | null;
 }
 
 export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
@@ -722,10 +739,16 @@ export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
   const res = await proxyFetch<{
     pnl_1d?: number; pnl_7d?: number; pnl_30d?: number; pnl_total?: number;
     first_snapshot_at?: number;
+    days_active?: number;
     // Legacy format fallback (production proxy)
     spread_1d?: number; spread_7d?: number; spread_30d?: number; spread_total?: number;
     funding_1d?: number; funding_7d?: number; funding_30d?: number; funding_total?: number;
     first_fill_at?: number;
+    unrealized_pnl?: number;
+    initial_capital_usd?: number;
+    avg_invested_capital_usd?: number;
+    twr_annualized_pct?: number | null;
+    mwr_annualized_pct?: number | null;
   }>(`/bot/earnings${qs}`);
   // Support both new (pnl) and old (spread+funding) response formats
   return {
@@ -734,6 +757,20 @@ export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
     pnl30d: res.pnl_30d ?? ((res.spread_30d ?? 0) + (res.funding_30d ?? 0)),
     pnlTotal: res.pnl_total ?? ((res.spread_total ?? 0) + (res.funding_total ?? 0)),
     firstSnapshotAt: res.first_snapshot_at ?? res.first_fill_at ?? 0,
+    daysActive: res.days_active ?? 0,
+    spread1d: res.spread_1d ?? 0,
+    spread7d: res.spread_7d ?? 0,
+    spread30d: res.spread_30d ?? 0,
+    spreadTotal: res.spread_total ?? 0,
+    funding1d: res.funding_1d ?? 0,
+    funding7d: res.funding_7d ?? 0,
+    funding30d: res.funding_30d ?? 0,
+    fundingTotal: res.funding_total ?? 0,
+    unrealizedPnl: res.unrealized_pnl ?? 0,
+    initialCapitalUsd: res.initial_capital_usd ?? 0,
+    avgInvestedCapitalUsd: res.avg_invested_capital_usd ?? 0,
+    twrAnnualizedPct: res.twr_annualized_pct ?? null,
+    mwrAnnualizedPct: res.mwr_annualized_pct ?? null,
   };
 }
 
@@ -747,6 +784,7 @@ export async function getBotStatus(marketId?: number): Promise<BotStatus> {
     open_order_count: number; last_mark_price: number; last_update: number;
     error_msg: string | null; iteration: number; started_at: number;
     initial_capital_usd: number;
+    avg_invested_capital_usd?: number;
   }>(`/bot/status${qs}`);
   return {
     status: res.status as BotStatus['status'],
@@ -763,6 +801,7 @@ export async function getBotStatus(marketId?: number): Promise<BotStatus> {
     iteration: res.iteration,
     startedAt: res.started_at,
     initialCapitalUsd: res.initial_capital_usd,
+    avgInvestedCapitalUsd: res.avg_invested_capital_usd ?? 0,
   };
 }
 
