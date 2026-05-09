@@ -95,7 +95,7 @@ interface UnhedgeOrchestratorProps {
   availableUsdc?: number;
   /**
    * ETH mainnet recovery: position closed, Lighter withdrawal done, USDC already on
-   * Ethereum mainnet. Skip close+withdraw entirely — just relay to wagyu directly.
+   * Ethereum mainnet. Skip close+withdraw entirely — just relay to the swap provider directly.
    * Value is the ETH mainnet USDC balance in USD (used for quoting).
    */
   ethUsdcRecovery?: number;
@@ -249,7 +249,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
         await signAndRelay(order.depositAddress, valueMicro, order.orderId, order.provider);
       } else if (recoveryMode) {
         // 2b. Position already closed — just withdraw whatever is left in Lighter.
-        // Wagyu order created later, when USDC actually lands on ETH mainnet.
+        // Swap order created later, when USDC actually lands on ETH mainnet.
         const withdrawResult = await withdrawUsdc();
         if (!withdrawResult.success) throw new Error(withdrawResult.error ?? 'Withdrawal failed');
 
@@ -262,8 +262,8 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
         startUsdcPolling(balanceBefore, xmrAddr);
       } else {
         // 2c. Normal flow — stop bot, close short + initiate Lighter withdrawal.
-        // Wagyu order created later, when USDC actually lands on ETH mainnet (avoids
-        // the wagyu 30-min deposit window expiring during the 1–4h Lighter withdrawal).
+        // Swap order created later, when USDC actually lands on ETH mainnet (avoids
+        // the provider deposit window expiring during the 1–4h Lighter withdrawal).
         await stopBot().catch(() => {});
         const closeResult = await closeHedgeAndWithdraw();
         if (!closeResult.success) throw new Error(closeResult.error ?? 'Close failed');
@@ -406,7 +406,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
     }, 5_000);
   }
 
-  // ── Poll wagyu order until XMR delivered ─────────────────────────────────────
+  // ── Poll swap order until XMR delivered ─────────────────────────────────────
 
   function startBridgePolling(orderId: string, provider: SwapProvider) {
     const MAX_POLLS = 120; // 20 min @ 10s
@@ -622,7 +622,7 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
             try {
               const balance = await fetchEthUsdcBalanceProxy(ethWallet!.address);
               if (balance > 0.01) {
-                // USDC landed — use force recovery path with a fresh wagyu order
+                // USDC landed — use force recovery path with a fresh swap order
                 _clear();
                 if (onForceEthRecovery) onForceEthRecovery(balance);
                 else onUnhedged();
