@@ -11,7 +11,7 @@ description: |
   - Automated USD/EUR/GBP/XAU/XAG hedging
   - Built-in market-making bots
   - Non-custodial by design
-license: MIT
+license: GPL-3.0
 website: https://app.nerohedge.app
 tags:
   - monero
