@@ -1,0 +1,23 @@
+repository: https://github.com/rpetermc/nerodolla
+release_source: ./website/nerohedge-release.apk
+name: NeroHedge
+summary: Self-custodial XMR wallet with automated FX hedging
+description: |
+  NeroHedge is a self-custodial Monero (XMR) wallet with built-in
+  automated FX hedging via Lighter perpetual futures.
+  
+  Features:
+  - Self-custodial XMR wallet
+  - Automated USD/EUR/GBP/XAU/XAG hedging
+  - Built-in market-making bots
+  - Non-custodial by design
+license: MIT
+website: https://app.nerohedge.app
+tags:
+  - monero
+  - xmr
+  - privacy
+  - wallet
+  - hedge
+  - defi
+pubkey: npub1eydmpxn40ruu9tjsy2n9ucdgv3g3yqmdhfm5ekdthvjfqjcpsdss26l3nr
