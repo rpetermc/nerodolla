@@ -194,8 +194,6 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
     : recoveryMode
       ? (availableUsdc ?? hedgeStatus?.lighterUsdc ?? 0)
       : (hedgeStatus?.lighterUsdc ?? 0);
-  const usdcMicro = BigInt(Math.floor(usdcCollateral * 1e6));
-
   // ── Step: idle → quoting → confirming ───────────────────────────────────────
 
   async function startQuote() {

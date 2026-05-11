@@ -251,7 +251,7 @@ export async function submitRawTx(
  */
 export async function pingLws(baseUrl: string, timeoutMs = 5_000): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/get_unspent_outs`, {
+    await fetch(`${baseUrl.replace(/\/$/, '')}/get_unspent_outs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: '', view_key: '', amount: '0', mixin: 0, use_dust: false, dust_threshold: '0' }),

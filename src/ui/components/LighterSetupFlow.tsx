@@ -14,13 +14,14 @@ import { useState, useEffect, useRef } from 'react';
 import { ethers } from 'ethers';
 import { useWalletStore } from '../../store/wallet';
 import { signMessage, createEthSigner } from '../../wallet/eth';
-import { saveZkKey } from '../../wallet/keystore';
+import { saveZkKey, loadZkKey } from '../../wallet/keystore';
 import {
   checkLighterSetup,
   generateLighterZkKey,
   getLighterSigningMessage,
   completeLighterSetup,
   setProxySessionToken,
+  initLighterSession,
 } from '../../backend/lighter';
 import type { LighterSigningData } from '../../backend/lighter';
 import {
@@ -59,7 +60,7 @@ const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)'
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function LighterSetupFlow({ onReady }: Props) {
-  const { ethWallet, setSessionToken } = useWalletStore();
+  const { ethWallet, setSessionToken, activeWalletId } = useWalletStore();
 
   // ── Setup wizard state ────────────────────────────────────────────────────
   const [step, setStep]                   = useState<SetupStep>('checking');
@@ -99,9 +100,30 @@ export function LighterSetupFlow({ onReady }: Props) {
       }
 
       if (!status.hasApiKey) {
-        const { zkPrivateKey } = await generateLighterZkKey(ethWallet.address);
-        if (zkPrivateKey) {
-          await saveZkKey(ethWallet.privateKey, zkPrivateKey);
+        // Try to reuse an existing stored ZK key before generating a new one.
+        let hasWorkingSession = false;
+        const storedZkKey = await loadZkKey(ethWallet.privateKey, activeWalletId ?? undefined);
+        if (storedZkKey) {
+          try {
+            const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, storedZkKey);
+            setSessionToken(token);
+            setProxySessionToken(token);
+            hasWorkingSession = true;
+          } catch (initErr: any) {
+            const msg = String(initErr?.message ?? initErr ?? '');
+            if (msg.includes('zk_key_rejected')) {
+              console.log('[LighterSetupFlow] Stored ZK key rejected, will re-register');
+            } else {
+              throw initErr;
+            }
+          }
+        }
+
+        if (!hasWorkingSession) {
+          const { zkPrivateKey } = await generateLighterZkKey(ethWallet.address);
+          if (zkPrivateKey) {
+            await saveZkKey(ethWallet.privateKey, zkPrivateKey);
+          }
         }
       }
 

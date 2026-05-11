@@ -28,12 +28,13 @@ import {
   getDepositStatus,
   reRegisterZkKey,
   startBot,
+  stopBot,
   getMarketInfo,
 } from '../../backend/lighter';
 import type { LighterSigningData, HedgeCurrency } from '../../backend/lighter';
 import { signMessage } from '../../wallet/eth';
-import { saveZkKey } from '../../wallet/keystore';
-import { setProxySessionToken, renewSession } from '../../backend/lighter';
+import { saveZkKey, loadZkKey } from '../../wallet/keystore';
+import { setProxySessionToken, renewSession, initLighterSession } from '../../backend/lighter';
 
 // ── Persistence helpers (resume after PIN lock) ────────────────────────────
 
@@ -43,16 +44,31 @@ interface PersistedHedgeState {
   savedAt: number;
 }
 
+interface PersistedDepositPending {
+  amountUsdc: number;
+  savedAt: number;
+}
+
 const HEDGE_PERSIST_PREFIX = 'nerodolla_pending_hedge';
+const DEPOSIT_PENDING_PREFIX = 'nerodolla_deposit_pending';
 const HEDGE_PERSIST_TTL = 2 * 60 * 60 * 1000; // 2h — wagyu order lifetime
+const DEPOSIT_PENDING_TTL = 4 * 60 * 60 * 1000; // 4h — match Lighter freshness window
 
 function hedgeKey(walletId?: string | null): string {
   return walletId ? `${HEDGE_PERSIST_PREFIX}_${walletId}` : HEDGE_PERSIST_PREFIX;
+}
+function depositPendingKey(walletId?: string | null): string {
+  return walletId ? `${DEPOSIT_PENDING_PREFIX}_${walletId}` : DEPOSIT_PENDING_PREFIX;
 }
 
 function saveHedgeState(state: Omit<PersistedHedgeState, 'savedAt'>, walletId?: string | null) {
   try {
     localStorage.setItem(hedgeKey(walletId), JSON.stringify({ ...state, savedAt: Date.now() }));
+  } catch { /* ignore */ }
+}
+function saveDepositPending(amountUsdc: number, walletId?: string | null) {
+  try {
+    localStorage.setItem(depositPendingKey(walletId), JSON.stringify({ amountUsdc, savedAt: Date.now() }));
   } catch { /* ignore */ }
 }
 
@@ -68,9 +84,24 @@ function loadHedgeState(walletId?: string | null): PersistedHedgeState | null {
     return data;
   } catch { return null; }
 }
+function loadDepositPending(walletId?: string | null): PersistedDepositPending | null {
+  try {
+    const raw = localStorage.getItem(depositPendingKey(walletId));
+    if (!raw) return null;
+    const data = JSON.parse(raw) as PersistedDepositPending;
+    if (Date.now() - data.savedAt > DEPOSIT_PENDING_TTL) {
+      localStorage.removeItem(depositPendingKey(walletId));
+      return null;
+    }
+    return data;
+  } catch { return null; }
+}
 
 function clearHedgeState(walletId?: string | null) {
   try { localStorage.removeItem(hedgeKey(walletId)); } catch { /* ignore */ }
+}
+function clearDepositPending(walletId?: string | null) {
+  try { localStorage.removeItem(depositPendingKey(walletId)); } catch { /* ignore */ }
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -169,6 +200,8 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   const signingDataRef   = useRef<LighterSigningData | null>(null);
   const modeRef          = useRef<'simple' | 'bot'>('simple');
   const currencyRef      = useRef<HedgeCurrency>(savedCurrency ?? 'USD');
+  // Track bots started during this flow so we can stop them if the user abandons
+  const startedBotsRef   = useRef<Set<number>>(new Set());
 
   // Resume in-flight bridge if the app was locked mid-flow, or auto-check when
   // we already know USDC is waiting in Lighter (preCheck prop).
@@ -180,15 +213,46 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       setIsResumed(true);
       setStep('bridging');
       startBridgePolling(saved.bridgeOrder);
-    } else if (preCheck) {
-      // Skip the idle CTA — the caller knows USDC is already in Lighter.
-      runCheck();
+    } else {
+      const depPending = loadDepositPending(activeWalletId);
+      if (depPending) {
+        setDepositPendingAmt(depPending.amountUsdc);
+        setPendingRecoveryStep('deposit_pending');
+        setStep('mode_select');
+      } else if (preCheck) {
+        // Skip the idle CTA — the caller knows USDC is already in Lighter.
+        runCheck();
+      }
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (quoteTimerRef.current) clearTimeout(quoteTimerRef.current);
     };
   }, [activeWalletId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stop any bots that were started during this flow if the user abandons it
+  // (goes back to idle/error without reaching live).
+  useEffect(() => {
+    return () => {
+      // Component unmount: if we never reached 'live', stop orphaned bots
+      for (const marketId of startedBotsRef.current) {
+        stopBot(marketId).catch(() => { /* ignore */ });
+      }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (step === 'live') {
+      // Flow completed successfully — clear tracked bots so unmount cleanup is a no-op
+      startedBotsRef.current.clear();
+    } else if ((step === 'idle' || step === 'error') && startedBotsRef.current.size > 0) {
+      // User abandoned the flow — stop any bots we started
+      for (const marketId of Array.from(startedBotsRef.current)) {
+        stopBot(marketId).catch(() => { /* ignore */ });
+      }
+      startedBotsRef.current.clear();
+    }
+  }, [step]);
 
   // Floor to 6 d.p. so computed amounts never exceed spendable balance (toFixed rounds up)
   const maxXmr = xmrInfo ? Math.floor(Number(xmrInfo.spendableBalance) / 1e6) / 1e6 : 0;
@@ -197,7 +261,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
 
   // ── Step: idle → checking → slider ─────────────────────────────────────────
 
-  async function runCheck() {
+  async function runCheck(opts?: { fromDepositPending?: boolean }) {
     if (!ethWallet) return;
     setStep('checking');
     try {
@@ -214,15 +278,37 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       isNewAccountRef.current = isNew;
 
       if (!status.hasApiKey) {
-        // No key registered yet — generate one and prepare signing step
-        const { zkPrivateKey } = await generateLighterZkKey(ethWallet.address);
-        if (zkPrivateKey) {
-          await saveZkKey(ethWallet.privateKey, zkPrivateKey);
+        // Try to reuse an existing stored ZK key before generating a new one.
+        // This avoids unnecessary key rotations when the user opens the app on
+        // a different device or revisits the hedge tab.
+        let hasWorkingSession = false;
+        const storedZkKey = await loadZkKey(ethWallet.privateKey, activeWalletId ?? undefined);
+        if (storedZkKey) {
+          try {
+            const token = await initLighterSession(ethWallet.address, ethWallet.privateKey, storedZkKey);
+            setSessionToken(token);
+            setProxySessionToken(token);
+            hasWorkingSession = true;
+          } catch (initErr: any) {
+            const msg = String(initErr?.message ?? initErr ?? '');
+            if (msg.includes('zk_key_rejected')) {
+              console.log('[HedgeOrchestrator] Stored ZK key rejected, will re-register');
+            } else {
+              throw initErr;
+            }
+          }
         }
-        if (status.accountExists) {
-          const sd = await getLighterSigningMessage(ethWallet.address);
-          setSigningData(sd);
-          signingDataRef.current = sd;
+
+        if (!hasWorkingSession) {
+          const { zkPrivateKey } = await generateLighterZkKey(ethWallet.address);
+          if (zkPrivateKey) {
+            await saveZkKey(ethWallet.privateKey, zkPrivateKey);
+          }
+          if (status.accountExists) {
+            const sd = await getLighterSigningMessage(ethWallet.address);
+            setSigningData(sd);
+            signingDataRef.current = sd;
+          }
         }
       }
 
@@ -235,6 +321,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
 
         // Already hedged — nothing to do
         if (hasShort) {
+          clearDepositPending(activeWalletId);
           setStep('live');
           return;
         }
@@ -242,6 +329,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         // USDC landed but no short yet — offer to open position.
         // Use a $1 floor to ignore dust / withdrawal-in-transit collateral artifacts.
         if (account.usdcBalance >= 1.0) {
+          clearDepositPending(activeWalletId);
           setUsdcReady(account.usdcBalance);
           setPendingRecoveryStep('usdc_ready');
           setStep('mode_select');
@@ -259,6 +347,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             && (nowS - depStatus.createdAt) < DEPOSIT_FRESH_WINDOW_S;
           if (depStatus.status === 'confirmed' && isFresh) {
             // Recent confirmed deposit — USDC is on its way, not yet credited
+            clearDepositPending(activeWalletId);
             const amt = depStatus.amountUsdc ?? 0;
             setUsdcReady(amt);
             setPendingRecoveryStep('usdc_ready');
@@ -267,6 +356,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           }
           if (depStatus.status === 'pending' && depStatus.amountUsdc && depStatus.amountUsdc > 0) {
             setDepositPendingAmt(depStatus.amountUsdc);
+            saveDepositPending(depStatus.amountUsdc, activeWalletId);
             setPendingRecoveryStep('deposit_pending');
             setStep('mode_select');
             return;
@@ -274,8 +364,20 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         } catch (depErr) {
           console.warn('[HedgeOrchestrator] Deposit status check failed:', depErr);
         }
+
+        // If we got here from deposit_pending and the deposit is still not found,
+        // stay in deposit_pending instead of falling through to slider.
+        if (opts?.fromDepositPending && depositPendingAmt != null) {
+          setStep('deposit_pending');
+          return;
+        }
       } catch (acctErr) {
         console.warn('[HedgeOrchestrator] getLighterAccount failed:', acctErr);
+        // If we got here from deposit_pending, stay there; otherwise fall through to slider
+        if (opts?.fromDepositPending && depositPendingAmt != null) {
+          setStep('deposit_pending');
+          return;
+        }
         // Non-fatal — proxy may not be running; fall through to slider
       }
 
@@ -323,10 +425,12 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   async function doStartBot() {
     if (!xmrKeys) return;
     try {
-      await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, currencyRef.current);
+      const result = await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, currencyRef.current);
+      if (result.marketId) startedBotsRef.current.add(result.marketId);
       const botKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
       localStorage.setItem(botKey, 'true');
       clearHedgeState(activeWalletId);
+      clearDepositPending(activeWalletId);
       setStep('live');
       onHedgeOpened();
     } catch (err) {
@@ -471,9 +575,15 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
           clearHedgeState(activeWalletId);
-          // USDC should now be in Lighter — run account check which handles
-          // session readiness and transitions to mode_select.
-          runCheck();
+          // USDC arrived at intent address but Lighter may not have indexed it yet.
+          // Stash the expected amount so runCheck knows to stay in deposit_pending
+          // if the deposit status comes back not_found (timing race).
+          const expectedUsdc = parseFloat(detail.expectedOutput) / 1e6;
+          if (expectedUsdc > 0) {
+            setDepositPendingAmt(expectedUsdc);
+            saveDepositPending(expectedUsdc, activeWalletId);
+          }
+          runCheck({ fromDepositPending: true });
         } else if (['failed', 'refunded', 'expired'].includes(detail.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
@@ -492,38 +602,6 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   }
 
   // ── Account polling (new accounts only) ────────────────────────────────────
-
-  function startAccountPolling() {
-    if (!ethWallet) return;
-    const MAX_POLLS = 144; // 12 min @ 5s
-    let polls = 0;
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      polls++;
-      if (polls > MAX_POLLS) {
-        clearInterval(pollRef.current!);
-        pollRef.current = null;
-        setErrorMsg('Lighter account not found after 12 minutes');
-        setStep('error');
-        return;
-      }
-      try {
-        const status = await checkLighterSetup(ethWallet.address);
-        if (status.accountExists) {
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
-          if (!signingDataRef.current) {
-            const sd = await getLighterSigningMessage(ethWallet.address);
-            setSigningData(sd);
-            signingDataRef.current = sd;
-          }
-          setStep('signing');
-        }
-      } catch {
-        // Keep polling
-      }
-    }, 5_000);
-  }
 
   // ── Step: signing → opening ─────────────────────────────────────────────────
 
@@ -620,6 +698,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         const hasShort = account.positions.some(p => p.symbol === 'XMR-USD' && p.side === 'SHORT');
         if (hasShort) {
           clearHedgeState(activeWalletId);
+          clearDepositPending(activeWalletId);
           setStep('live');
           onHedgeOpened();
           return;
@@ -629,6 +708,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     // Timed out — still call onHedgeOpened so the parent can refresh; it should
     // appear shortly and the home screen sync will pick it up.
     clearHedgeState(activeWalletId);
+    clearDepositPending(activeWalletId);
     setStep('live');
     onHedgeOpened();
   }
@@ -667,7 +747,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   if (step === 'idle') {
     return (
       <div className="hedge-orch">
-        <button className="btn btn--primary hedge-orch__cta" onClick={runCheck}>
+        <button className="btn btn--primary hedge-orch__cta" onClick={() => runCheck()}>
           Swap XMR → lock USD value
         </button>
       </div>
@@ -727,12 +807,14 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       try {
         const account = await getLighterAccount(ethWallet!.address);
         if (account.usdcBalance >= 1.0) {
+          clearDepositPending(activeWalletId);
           setUsdcReady(account.usdcBalance);
           setStep('usdc_ready');
           return;
         }
         // Still 0 on account — fall back to using the known deposit amount
         if (depositPendingAmt && depositPendingAmt > 0) {
+          clearDepositPending(activeWalletId);
           setUsdcReady(depositPendingAmt);
           setStep('usdc_ready');
           return;
@@ -740,6 +822,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
       } catch {
         // proxy down — use known deposit amount as fallback
         if (depositPendingAmt && depositPendingAmt > 0) {
+          clearDepositPending(activeWalletId);
           setUsdcReady(depositPendingAmt);
           setStep('usdc_ready');
           return;
@@ -762,7 +845,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
           This usually takes 1–5 minutes.
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn btn--secondary" onClick={runCheck}>
+          <button className="btn btn--secondary" onClick={() => runCheck({ fromDepositPending: true })}>
             Check again
           </button>
           <button className="btn btn--primary" onClick={tryOpenFromPending}>

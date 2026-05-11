@@ -12,7 +12,6 @@ import {
   getQuote as wagyuHedgeQuote,
   createOrder as wagyuHedgeCreateOrder,
   toAtomicStr,
-  formatTokenAmount,
   xmrToAtomic,
   XMR_TOKEN,
   ARBITRUM_CHAIN_ID,

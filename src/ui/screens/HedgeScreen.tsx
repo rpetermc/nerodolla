@@ -4,7 +4,8 @@ import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
 import { CollateralAdjust } from '../components/CollateralAdjust';
-import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID } from '../../backend/lighter';
+import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID, getAccountEarnings } from '../../backend/lighter';
+import type { BotEarnings } from '../../backend/lighter';
 import type { LighterMarketInfo, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 
 const WARN_MARGIN_PCT = 20;
@@ -98,6 +99,7 @@ export function HedgeScreen() {
   const [botActive, setBotActive] = useState(false);
   const [realisedApy, setRealisedApy] = useState<number | null>(null);
   const [currencyBotApy, setCurrencyBotApy] = useState<number | null>(null);
+  const [accountEarnings, setAccountEarnings] = useState<BotEarnings | null>(null);
   const [ethUsdcBalance, setEthUsdcBalance] = useState<number>(0);
   const [forcedEthRecovery, setForcedEthRecovery] = useState<number>(0);
   const [recoverInstead, setRecoverInstead] = useState(false);
@@ -112,6 +114,18 @@ export function HedgeScreen() {
       getMarketInfo(`${effectiveHedgeCurrency}-USD`).then(setCurrencyMarket).catch(() => {});
     }
   }, [setLighterMarket, effectiveHedgeCurrency]);
+
+  // Poll account-level earnings for headline total-return APY
+  useEffect(() => {
+    if (!botActive) return;
+    const fetchAccountEarnings = () =>
+      getAccountEarnings()
+        .then(e => setAccountEarnings(e))
+        .catch(() => {});
+    fetchAccountEarnings();
+    const id = setInterval(fetchAccountEarnings, 60_000);
+    return () => clearInterval(id);
+  }, [botActive]);
 
   // Poll Ethereum mainnet USDC balance every 30s when not hedged and Lighter is empty.
   // Catches the withdrawal-in-transit window: Lighter withdrawal done but USDC not yet
@@ -215,7 +229,15 @@ export function HedgeScreen() {
               <span className="market-stat__label">APY</span>
               <span className="market-stat__value">
                 {(() => {
-                  // For multi-currency hedges, show combined APY from both bots
+                  // 1. Account-level hedge-currency MWR (most accurate for non-USD hedges)
+                  if (effectiveHedgeCurrency !== 'USD' && accountEarnings?.mwrAnnualizedPctHedge != null) {
+                    return `${accountEarnings.mwrAnnualizedPctHedge.toFixed(1)}%`;
+                  }
+                  // 2. Account-level USD MWR (total portfolio return including wallet)
+                  if (accountEarnings?.mwrAnnualizedPct != null) {
+                    return `${accountEarnings.mwrAnnualizedPct.toFixed(1)}%`;
+                  }
+                  // 3. Fallback: average per-market total-return APYs
                   if (effectiveHedgeCurrency !== 'USD' && currencyBotApy !== null && realisedApy !== null) {
                     const combined = (realisedApy + currencyBotApy) / 2;
                     return `${combined.toFixed(1)}%`;
@@ -291,7 +313,7 @@ export function HedgeScreen() {
           return (
             <UnhedgeOrchestrator
               onUnhedged={() => { setEthUsdcBalance(0); refreshHedgeStatus(); }}
-              walletId={activeWalletId}
+              walletId={activeWalletId ?? undefined}
               ethUsdcRecovery={ethUsdcBalance}
             />
           );

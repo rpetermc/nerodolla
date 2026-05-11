@@ -91,11 +91,17 @@ function EarningsTable({ earnings, hedgeCurrency, currencyMarkPrice }: {
           </span>
         )}
       </div>
-      {/* TWR / MWR */}
-      {(earnings.twrAnnualizedPct != null || earnings.mwrAnnualizedPct != null) && (
+      {/* Returns: total return (headline) + bot strategy (detail) */}
+      {(earnings.totalReturnAnnualizedPct != null || earnings.botStrategyAnnualizedPct != null) && (
         <div className="bot-pnl__returns" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: 2 }}>
+          {earnings.totalReturnAnnualizedPct != null && (
+            <span>APY: {earnings.totalReturnAnnualizedPct.toFixed(1)}%</span>
+          )}
+          {earnings.botStrategyAnnualizedPct != null && (
+            <span style={{ marginLeft: 8 }}>Bot strategy: {earnings.botStrategyAnnualizedPct.toFixed(1)}%</span>
+          )}
           {earnings.mwrAnnualizedPct != null && (
-            <span>APY (MWR): {earnings.mwrAnnualizedPct.toFixed(1)}%</span>
+            <span style={{ marginLeft: 8 }}>MWR: {earnings.mwrAnnualizedPct.toFixed(1)}%</span>
           )}
           {earnings.twrAnnualizedPct != null && (
             <span style={{ marginLeft: 8 }}>TWR: {earnings.twrAnnualizedPct.toFixed(1)}%</span>
@@ -152,10 +158,10 @@ export function BotToggle({ marketId, marketSymbol, xmrBalance, hedgePosition, l
     try {
       const e = await getBotEarnings(marketId);
       setEarnings(e);
-      // Compute realised APY using dynamic average invested capital.
+      // Compute headline APY.
       //
-      // If the backend provides MWR (Money-Weighted Return), use that directly.
-      // Otherwise fall back to pnlTotal / daysActive / avgInvestedCapitalUsd.
+      // Prefer backend-computed total return APY (includes unrealized PnL).
+      // Fall back to MWR if available, then to funding rate for new bots.
       const markPrice = lighterMarket?.markPrice ?? 0;
       const fundingApy = lighterMarket?.annualizedFundingPct
         ?? hedgePosition?.annualizedFundingPct ?? null;
@@ -167,16 +173,25 @@ export function BotToggle({ marketId, marketSymbol, xmrBalance, hedgePosition, l
       if (daysActive < 1 || markPrice <= 0) {
         onApyChange?.(fundingApy);
       } else {
-        // Prefer backend-computed MWR (handles deposits/withdrawals correctly)
-        if (e.mwrAnnualizedPct != null) {
+        // 1. Total return APY from backend (includes unrealized PnL + spread + funding)
+        if (e.totalReturnAnnualizedPct != null) {
+          let apy = e.totalReturnAnnualizedPct;
+          // Adjust APY for hedge currency movement
+          if (hedgeCurrency !== 'USD' && currencyEntryPrice && currencyEntryPrice > 0 && currencyMarkPrice > 0) {
+            apy *= currencyEntryPrice / currencyMarkPrice;
+          }
+          onApyChange?.(apy);
+        }
+        // 2. Fallback to backend MWR (account-level, handles deposits/withdrawals)
+        else if (e.mwrAnnualizedPct != null) {
           onApyChange?.(e.mwrAnnualizedPct);
-        } else {
+        }
+        // 3. Legacy frontend computation (should rarely hit)
+        else {
           const totalEarned = e.pnlTotal;
-          // Use dynamic average invested capital instead of frozen initialCapitalUsd
           let capitalBase = e.avgInvestedCapitalUsd > 0
             ? e.avgInvestedCapitalUsd
             : botStatus?.avgInvestedCapitalUsd ?? 0;
-          // Fallback for legacy data
           if (capitalBase <= 0) {
             capitalBase = botStatus?.initialCapitalUsd ?? 0;
           }
@@ -189,7 +204,6 @@ export function BotToggle({ marketId, marketSymbol, xmrBalance, hedgePosition, l
 
           if (capitalBase > 0) {
             let apy = (totalEarned / daysActive) * 365 / capitalBase * 100;
-            // Adjust APY for hedge currency movement
             if (hedgeCurrency !== 'USD' && currencyEntryPrice && currencyEntryPrice > 0 && currencyMarkPrice > 0) {
               apy *= currencyEntryPrice / currencyMarkPrice;
             }

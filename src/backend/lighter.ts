@@ -727,11 +727,18 @@ export interface BotEarnings {
   funding30d: number;
   fundingTotal: number;
   unrealizedPnl: number;
+  // Total return (includes unrealized)
+  totalReturnPnl: number;
+  botStrategyAnnualizedPct: number | null;
+  totalReturnAnnualizedPct: number | null;
   // Capital & Returns
   initialCapitalUsd: number;
   avgInvestedCapitalUsd: number;
   twrAnnualizedPct: number | null;
   mwrAnnualizedPct: number | null;
+  // Hedge-currency returns (account-level only)
+  twrAnnualizedPctHedge: number | null;
+  mwrAnnualizedPctHedge: number | null;
 }
 
 export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
@@ -745,17 +752,24 @@ export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
     funding_1d?: number; funding_7d?: number; funding_30d?: number; funding_total?: number;
     first_fill_at?: number;
     unrealized_pnl?: number;
+    total_return_pnl?: number;
+    bot_strategy_annualized_pct?: number | null;
+    total_return_annualized_pct?: number | null;
     initial_capital_usd?: number;
     avg_invested_capital_usd?: number;
     twr_annualized_pct?: number | null;
     mwr_annualized_pct?: number | null;
+    twr_annualized_pct_hedge?: number | null;
+    mwr_annualized_pct_hedge?: number | null;
   }>(`/bot/earnings${qs}`);
   // Support both new (pnl) and old (spread+funding) response formats
+  const pnlTotal = res.pnl_total ?? ((res.spread_total ?? 0) + (res.funding_total ?? 0));
+  const unrealized = res.unrealized_pnl ?? 0;
   return {
     pnl1d: res.pnl_1d ?? ((res.spread_1d ?? 0) + (res.funding_1d ?? 0)),
     pnl7d: res.pnl_7d ?? ((res.spread_7d ?? 0) + (res.funding_7d ?? 0)),
     pnl30d: res.pnl_30d ?? ((res.spread_30d ?? 0) + (res.funding_30d ?? 0)),
-    pnlTotal: res.pnl_total ?? ((res.spread_total ?? 0) + (res.funding_total ?? 0)),
+    pnlTotal,
     firstSnapshotAt: res.first_snapshot_at ?? res.first_fill_at ?? 0,
     daysActive: res.days_active ?? 0,
     spread1d: res.spread_1d ?? 0,
@@ -766,12 +780,22 @@ export async function getBotEarnings(marketId?: number): Promise<BotEarnings> {
     funding7d: res.funding_7d ?? 0,
     funding30d: res.funding_30d ?? 0,
     fundingTotal: res.funding_total ?? 0,
-    unrealizedPnl: res.unrealized_pnl ?? 0,
+    unrealizedPnl: unrealized,
+    totalReturnPnl: res.total_return_pnl ?? (pnlTotal + unrealized),
+    botStrategyAnnualizedPct: res.bot_strategy_annualized_pct ?? null,
+    totalReturnAnnualizedPct: res.total_return_annualized_pct ?? null,
     initialCapitalUsd: res.initial_capital_usd ?? 0,
     avgInvestedCapitalUsd: res.avg_invested_capital_usd ?? 0,
     twrAnnualizedPct: res.twr_annualized_pct ?? null,
     mwrAnnualizedPct: res.mwr_annualized_pct ?? null,
+    twrAnnualizedPctHedge: res.twr_annualized_pct_hedge ?? null,
+    mwrAnnualizedPctHedge: res.mwr_annualized_pct_hedge ?? null,
   };
+}
+
+/** Fetch account-level earnings (total portfolio return, includes all positions + wallet). */
+export async function getAccountEarnings(): Promise<BotEarnings> {
+  return getBotEarnings();
 }
 
 /** Get current bot state. */

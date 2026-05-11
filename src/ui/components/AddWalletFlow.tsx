@@ -88,9 +88,9 @@ export function AddWalletFlow({ pin, onComplete, onCancel }: AddWalletFlowProps)
       store.setHedgeStatus(null);
       store.setLighterMarket(null);
       store.setSessionToken(null);
-      store.setUsdcBalance(null);
+      store.setUsdcBalance('');
       store.setReceiveAddress(null, 0);
-      store.setLastSyncAt(null);
+      store.setLastSyncAt(0);
 
       // Activate the new wallet's keys
       setKeys(phrase, xmrKeys, ethWallet);

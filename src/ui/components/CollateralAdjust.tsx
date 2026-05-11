@@ -17,7 +17,7 @@ import {
   type SwapQuote,
   type SwapOrder,
 } from '../../backend/swapProvider';
-import { transferXmr, formatXmr } from '../../backend/lws';
+import { transferXmr } from '../../backend/lws';
 
 type Step =
   | 'idle' | 'form' | 'confirming'
