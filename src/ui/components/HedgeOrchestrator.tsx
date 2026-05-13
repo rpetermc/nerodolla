@@ -7,7 +7,7 @@
  *        → opening → live | error
  */
 import { useState, useRef, useEffect } from 'react';
-import { useWalletStore } from '../../store/wallet';
+import { useWalletStore, useSettingsStore } from '../../store/wallet';
 import { getDepositIntentAddress } from '../../backend/deposit';
 import { MIN_SWAP_XMR } from '../../backend/wagyu';
 import {
@@ -139,7 +139,8 @@ function maxHedgeableXmr(usdcAvailable: number, markPrice: number): number {
 }
 
 export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestratorProps) {
-  const { xmrKeys, ethWallet, xmrInfo, walletCreatedHeight, setSessionToken, lighterMarket, activeWalletId } = useWalletStore();
+  const { xmrKeys, ethWallet, xmrInfo, walletCreatedHeight, setSessionToken, lighterMarket, activeWalletId, walletList, setWalletList } = useWalletStore();
+  const { updateSettings } = useSettingsStore();
   // Per-wallet currency preference (stored in localStorage, not the global settings store)
   const walletCurrencyKey = activeWalletId ? `nerodolla_hedge_currency_${activeWalletId}` : null;
   const savedCurrency = walletCurrencyKey
@@ -171,6 +172,17 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     setCurrencyState(c);
     currencyRef.current = c;
     if (walletCurrencyKey) localStorage.setItem(walletCurrencyKey, c);
+    // Persist to wallet list so HedgeScreen can read it even before positions exist
+    if (activeWalletId) {
+      const idx = walletList.findIndex(w => w.id === activeWalletId);
+      if (idx >= 0) {
+        const updated = [...walletList];
+        updated[idx] = { ...updated[idx], hedgeCurrency: c };
+        setWalletList(updated);
+      }
+    }
+    // Update global default for new wallets
+    updateSettings({ hedgeCurrency: c });
     setQuote(null);
     // Apply currency-aware default collateral %
     const newPct = CURRENCY_DEFAULTS[c];
@@ -194,6 +206,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   // Refs for values accessed inside interval callbacks
   const pollRef          = useRef<ReturnType<typeof setInterval> | null>(null);
   const quoteTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const depositCheckRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bridgeOrderRef   = useRef<SwapOrder | null>(null);
   const bridgeDetailRef  = useRef<SwapOrder | null>(null);
   const isNewAccountRef  = useRef(false);
@@ -227,6 +240,7 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (quoteTimerRef.current) clearTimeout(quoteTimerRef.current);
+      if (depositCheckRef.current) clearTimeout(depositCheckRef.current);
     };
   }, [activeWalletId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -369,6 +383,11 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         // stay in deposit_pending instead of falling through to slider.
         if (opts?.fromDepositPending && depositPendingAmt != null) {
           setStep('deposit_pending');
+          // Auto-retry every 30s so the user doesn't have to keep tapping "Check again"
+          if (depositCheckRef.current) clearTimeout(depositCheckRef.current);
+          depositCheckRef.current = setTimeout(() => {
+            runCheck({ fromDepositPending: true });
+          }, 30000);
           return;
         }
       } catch (acctErr) {
@@ -376,6 +395,11 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
         // If we got here from deposit_pending, stay there; otherwise fall through to slider
         if (opts?.fromDepositPending && depositPendingAmt != null) {
           setStep('deposit_pending');
+          // Auto-retry every 30s so the user doesn't have to keep tapping "Check again"
+          if (depositCheckRef.current) clearTimeout(depositCheckRef.current);
+          depositCheckRef.current = setTimeout(() => {
+            runCheck({ fromDepositPending: true });
+          }, 30000);
           return;
         }
         // Non-fatal — proxy may not be running; fall through to slider
@@ -425,10 +449,29 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
   async function doStartBot() {
     if (!xmrKeys) return;
     try {
+      // Start the primary currency bot (XMR for USD, or the selected currency bot)
       const result = await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, currencyRef.current);
       if (result.marketId) startedBotsRef.current.add(result.marketId);
       const botKey = activeWalletId ? `nerodolla_bot_active_${activeWalletId}` : 'nerodolla_bot_active';
       localStorage.setItem(botKey, 'true');
+      // Also set per-market key so HedgeScreen can track this bot independently
+      if (result.marketId && activeWalletId) {
+        localStorage.setItem(`nerodolla_bot_active_${activeWalletId}_m${result.marketId}`, 'true');
+      }
+
+      // For non-USD hedges, also start the XMR-USD bot so the short leg is actively managed
+      if (currencyRef.current !== 'USD') {
+        try {
+          const xmrResult = await startBot(xmrKeys.primaryAddress, xmrKeys.viewKeyPrivate, maxXmr, 'USD');
+          if (xmrResult.marketId) startedBotsRef.current.add(xmrResult.marketId);
+          if (activeWalletId) {
+            localStorage.setItem(`nerodolla_bot_active_${activeWalletId}_m77`, 'true');
+          }
+        } catch (xmrErr) {
+          console.warn('XMR bot auto-start failed (non-fatal):', xmrErr);
+        }
+      }
+
       clearHedgeState(activeWalletId);
       clearDepositPending(activeWalletId);
       setStep('live');
@@ -974,6 +1017,9 @@ export function HedgeOrchestrator({ onHedgeOpened, preCheck }: HedgeOrchestrator
             {xmrFromPct.toFixed(4)} XMR
             {quote
               ? <> → <strong>{quote.minReceived} USDC</strong> min
+                  <span className="provider-badge" style={{marginLeft: 8, fontSize: 11, padding: '2px 6px', borderRadius: 4, background: quote.provider === 'trocador' ? 'var(--color-trocador)' : 'var(--color-wagyu)', color: '#fff'}}>
+                    {quote.provider === 'trocador' ? 'Trocador' : 'wagyu'}
+                  </span>
                   {currencyLockValue && <> ≈ <strong>{currencyLockUnit ? `${currencyLockValue} ${currencyLockUnit}` : `${CURRENCY_SYMBOLS[currency]}${currencyLockValue}`}</strong> locked</>}
                 </>
               : <> — fetching quote…</>}

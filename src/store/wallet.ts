@@ -374,7 +374,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     }),
     {
       name: 'nerodolla-settings',
-      version: 8,
+      version: 10,
       migrate(stored: unknown) {
         const s = stored as Record<string, unknown>;
         // v1→v2: revert dead public LWS URLs back to proxy routing
@@ -409,6 +409,13 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         }
         // v7→v8: add lastActiveWalletId for multi-wallet
         if (s.lastActiveWalletId === undefined) s.lastActiveWalletId = null;
+        // v8→v9 / v9→v10: revert backup-VPS direct LWS routing; force back to main proxy
+        if ((s.remoteLwsUrl as string)?.includes('lws.nerohedge.app')) {
+          s.remoteLwsUrl = '/lws';
+        }
+        if ((s.lwsEndpoint as string)?.includes('lws.nerohedge.app')) {
+          s.lwsEndpoint = '/lws';
+        }
         return s;
       },
     }

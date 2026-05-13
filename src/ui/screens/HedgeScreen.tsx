@@ -4,8 +4,8 @@ import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
 import { CollateralAdjust } from '../components/CollateralAdjust';
-import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID, getAccountEarnings } from '../../backend/lighter';
-import type { BotEarnings } from '../../backend/lighter';
+import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID, getAccountEarnings, getBotStatus } from '../../backend/lighter';
+import type { BotEarnings, BotStatus } from '../../backend/lighter';
 import type { LighterMarketInfo, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 
 const WARN_MARGIN_PCT = 20;
@@ -35,6 +35,59 @@ const MarginWarning = memo(function MarginWarning({
     </div>
   );
 });
+
+function BotHealthPanel({ status, label }: { status: BotStatus | null; label: string }) {
+  if (!status || status.status === 'stopped') return null;
+  const target = status.targetXmr;
+  const pos = status.currentPosition;
+  const drift = target !== 0 ? Math.abs((pos - target) / target) * 100 : 0;
+  const isDrifted = drift > 10;
+  const lastUpdateAge = Math.round((Date.now() / 1000 - status.lastUpdate));
+  const stale = lastUpdateAge > 120;
+  return (
+    <div className={`bot-health-panel ${isDrifted ? 'bot-health-panel--drift' : ''} ${stale ? 'bot-health-panel--stale' : ''}`}>
+      <div className="bot-health-panel__header">
+        <span className="bot-health-panel__label">{label}</span>
+        <span className={`bot-health-panel__status bot-health-panel__status--${status.status}`}>
+          {status.status}
+        </span>
+      </div>
+      <div className="bot-health-panel__rows">
+        <div className="bot-health-panel__row">
+          <span>Target</span>
+          <span>{Math.abs(target).toFixed(4)}</span>
+        </div>
+        <div className="bot-health-panel__row">
+          <span>Position</span>
+          <span>{Math.abs(pos).toFixed(4)}</span>
+        </div>
+        {isDrifted && (
+          <div className="bot-health-panel__row bot-health-panel__row--warn">
+            <span>Drift</span>
+            <span>{drift.toFixed(1)}%</span>
+          </div>
+        )}
+        <div className="bot-health-panel__row">
+          <span>Open orders</span>
+          <span>{status.openOrderCount}</span>
+        </div>
+        <div className="bot-health-panel__row">
+          <span>Spread (24h)</span>
+          <span>${status.realizedSpread.toFixed(2)}</span>
+        </div>
+        {stale && (
+          <div className="bot-health-panel__row bot-health-panel__row--warn">
+            <span>Last update</span>
+            <span>{lastUpdateAge}s ago</span>
+          </div>
+        )}
+        {status.errorMsg && (
+          <div className="bot-health-panel__error">{status.errorMsg}</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function RebalanceBanner({ drift, xmrBalance, onDone }: {
   drift: number;
@@ -89,7 +142,10 @@ export function HedgeScreen() {
 
   // Effective hedge currency: prefer live position-derived, fall back to wallet preference
   const walletEntry = walletList.find(w => w.id === activeWalletId);
-  const effectiveHedgeCurrency = hedgeStatus?.hedgeCurrency ?? walletEntry?.hedgeCurrency ?? 'USD';
+  const savedWalletCurrency = activeWalletId
+    ? (localStorage.getItem(`nerodolla_hedge_currency_${activeWalletId}`) as HedgeCurrency | null)
+    : null;
+  const effectiveHedgeCurrency = (hedgeStatus?.hedgeCurrency && hedgeStatus?.hedgeCurrency !== 'USD' ? hedgeStatus?.hedgeCurrency : null) ?? savedWalletCurrency ?? walletEntry?.hedgeCurrency ?? 'USD';
 
   const xmrBalance = xmrInfo
     ? Number(xmrInfo.totalReceived - xmrInfo.totalSent) / 1e12
@@ -106,6 +162,8 @@ export function HedgeScreen() {
   const [currencyMarket, setCurrencyMarket] = useState<LighterMarketInfo | null>(null);
   const [switching, setSwitching] = useState(false);
   const [switchTarget, setSwitchTarget] = useState<HedgeCurrency | null>(null);
+  const [xmrBotStatus, setXmrBotStatus] = useState<BotStatus | null>(null);
+  const [currencyBotStatus, setCurrencyBotStatus] = useState<BotStatus | null>(null);
 
   useEffect(() => {
     getXmrMarketInfo().then(setLighterMarket).catch(() => {});
@@ -126,6 +184,28 @@ export function HedgeScreen() {
     const id = setInterval(fetchAccountEarnings, 60_000);
     return () => clearInterval(id);
   }, [botActive]);
+
+  // Poll bot status every 30s when active — gives users visibility into
+  // target vs actual position, open orders, and any errors.
+  useEffect(() => {
+    if (!botActive) return;
+    const fetchStatus = () => {
+      getBotStatus(77)
+        .then(s => setXmrBotStatus(s))
+        .catch(() => {});
+      if (effectiveHedgeCurrency !== 'USD') {
+        const mktId = CURRENCY_TO_MARKET_ID[effectiveHedgeCurrency];
+        if (mktId) {
+          getBotStatus(mktId)
+            .then(s => setCurrencyBotStatus(s))
+            .catch(() => {});
+        }
+      }
+    };
+    fetchStatus();
+    const id = setInterval(fetchStatus, 30_000);
+    return () => clearInterval(id);
+  }, [botActive, effectiveHedgeCurrency]);
 
   // Poll Ethereum mainnet USDC balance every 30s when not hedged and Lighter is empty.
   // Catches the withdrawal-in-transit window: Lighter withdrawal done but USDC not yet
@@ -229,13 +309,22 @@ export function HedgeScreen() {
               <span className="market-stat__label">APY</span>
               <span className="market-stat__value">
                 {(() => {
+                  // Sanity-check account-level MWR: new or distorted accounts
+                  // (extreme values, <2 days) produce meaningless annualized rates.
+                  const mwrSane = (mwr: number | null, days: number) => {
+                    if (mwr == null) return false;
+                    if (days < 2) return false;
+                    if (Math.abs(mwr) > 500) return false;
+                    return true;
+                  };
+                  const daysActive = accountEarnings?.daysActive ?? 0;
                   // 1. Account-level hedge-currency MWR (most accurate for non-USD hedges)
-                  if (effectiveHedgeCurrency !== 'USD' && accountEarnings?.mwrAnnualizedPctHedge != null) {
-                    return `${accountEarnings.mwrAnnualizedPctHedge.toFixed(1)}%`;
+                  if (effectiveHedgeCurrency !== 'USD' && mwrSane(accountEarnings?.mwrAnnualizedPctHedge ?? null, daysActive)) {
+                    return `${accountEarnings!.mwrAnnualizedPctHedge!.toFixed(1)}%`;
                   }
                   // 2. Account-level USD MWR (total portfolio return including wallet)
-                  if (accountEarnings?.mwrAnnualizedPct != null) {
-                    return `${accountEarnings.mwrAnnualizedPct.toFixed(1)}%`;
+                  if (mwrSane(accountEarnings?.mwrAnnualizedPct ?? null, daysActive)) {
+                    return `${accountEarnings!.mwrAnnualizedPct!.toFixed(1)}%`;
                   }
                   // 3. Fallback: average per-market total-return APYs
                   if (effectiveHedgeCurrency !== 'USD' && currencyBotApy !== null && realisedApy !== null) {
@@ -442,6 +531,17 @@ export function HedgeScreen() {
                 />
               )}
 
+              {/* Bot health panels — visible when bot is active */}
+              {botActive && (
+                <div className="bot-health-section">
+                  <h4 className="bot-health-section__title">Bot Health</h4>
+                  <BotHealthPanel status={xmrBotStatus} label="XMR-USD" />
+                  {effectiveHedgeCurrency !== 'USD' && (
+                    <BotHealthPanel status={currencyBotStatus} label={`${effectiveHedgeCurrency}-USD`} />
+                  )}
+                </div>
+              )}
+
               <UnhedgeOrchestrator
                 onUnhedged={refreshHedgeStatus}
                 walletId={activeWalletId ?? undefined}
@@ -469,6 +569,16 @@ export function HedgeScreen() {
                 onActiveChange={setBotActive}
                 onApyChange={setRealisedApy}
               />
+              {effectiveHedgeCurrency !== 'USD' && (
+                <BotToggle
+                  marketId={currencyMarketId}
+                  marketSymbol={`${effectiveHedgeCurrency}-USD`}
+                  xmrBalance={xmrBalance}
+                  lighterUsdc={hedgeStatus?.lighterUsdc}
+                  hedgeCurrency={effectiveHedgeCurrency}
+                  onApyChange={setCurrencyBotApy}
+                />
+              )}
             </>
           );
         }

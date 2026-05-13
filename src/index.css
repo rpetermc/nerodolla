@@ -1357,3 +1357,20 @@ body {
   border-radius: var(--radius-sm); padding: 10px 12px;
   font-size: 13px; color: var(--color-yellow); line-height: 1.4;
 }
+
+/* ── Bot health panel ─────────────────────────────────────────────────────── */
+.bot-health-section { margin-bottom: 16px; }
+.bot-health-section__title { font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--color-text-muted); }
+.bot-health-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 8px; }
+.bot-health-panel--drift { border-left: 3px solid var(--color-yellow); }
+.bot-health-panel--stale { border-left: 3px solid var(--color-red); }
+.bot-health-panel__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.bot-health-panel__label { font-size: 14px; font-weight: 600; }
+.bot-health-panel__status { font-size: 12px; text-transform: uppercase; font-weight: 600; padding: 2px 8px; border-radius: 12px; background: var(--color-surface-2); }
+.bot-health-panel__status--running { background: rgba(76,175,80,0.15); color: var(--color-green); }
+.bot-health-panel__status--error { background: rgba(244,67,54,0.15); color: var(--color-red); }
+.bot-health-panel__status--paused { background: rgba(255,193,7,0.15); color: var(--color-yellow); }
+.bot-health-panel__rows { display: flex; flex-direction: column; gap: 4px; }
+.bot-health-panel__row { display: flex; justify-content: space-between; font-size: 13px; color: var(--color-text); }
+.bot-health-panel__row--warn { color: var(--color-yellow); font-weight: 600; }
+.bot-health-panel__error { margin-top: 8px; font-size: 12px; color: var(--color-red); background: rgba(244,67,54,0.08); padding: 8px; border-radius: var(--radius-sm); }

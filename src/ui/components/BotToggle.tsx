@@ -189,9 +189,9 @@ export function BotToggle({ marketId, marketSymbol, xmrBalance, hedgePosition, l
         // 3. Legacy frontend computation (should rarely hit)
         else {
           const totalEarned = e.pnlTotal;
-          let capitalBase = e.avgInvestedCapitalUsd > 0
-            ? e.avgInvestedCapitalUsd
-            : botStatus?.avgInvestedCapitalUsd ?? 0;
+          let capitalBase = Math.abs(e.avgInvestedCapitalUsd) > 0
+            ? Math.abs(e.avgInvestedCapitalUsd)
+            : Math.abs(botStatus?.avgInvestedCapitalUsd ?? 0);
           if (capitalBase <= 0) {
             capitalBase = botStatus?.initialCapitalUsd ?? 0;
           }
