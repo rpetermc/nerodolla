@@ -185,13 +185,20 @@ export function HedgeScreen() {
     return () => clearInterval(id);
   }, [botActive]);
 
-  // Poll bot status every 30s when active — gives users visibility into
-  // target vs actual position, open orders, and any errors.
+  // Poll bot status every 30s — gives users visibility into target vs actual
+  // position, open orders, and any errors.  We poll unconditionally (not just
+  // when botActive is true) so that if BotToggle fails to detect a running bot
+  // (e.g. stale session token on mobile), HedgeScreen can still show the panel.
   useEffect(() => {
-    if (!botActive) return;
     const fetchStatus = () => {
       getBotStatus(77)
-        .then(s => setXmrBotStatus(s))
+        .then(s => {
+          setXmrBotStatus(s);
+          // Auto-detect running bot even if BotToggle missed it
+          if (s?.status === 'running' || s?.status === 'paused') {
+            setBotActive(true);
+          }
+        })
         .catch(() => {});
       if (effectiveHedgeCurrency !== 'USD') {
         const mktId = CURRENCY_TO_MARKET_ID[effectiveHedgeCurrency];
@@ -205,7 +212,7 @@ export function HedgeScreen() {
     fetchStatus();
     const id = setInterval(fetchStatus, 30_000);
     return () => clearInterval(id);
-  }, [botActive, effectiveHedgeCurrency]);
+  }, [effectiveHedgeCurrency]);
 
   // Poll Ethereum mainnet USDC balance every 30s when not hedged and Lighter is empty.
   // Catches the withdrawal-in-transit window: Lighter withdrawal done but USDC not yet
