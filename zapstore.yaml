@@ -1,5 +1,4 @@
 repository: https://github.com/rpetermc/nerodolla
-release_source: ./website/nerohedge-release.apk
 name: NeroHedge
 summary: Self-custodial XMR wallet with automated FX hedging
 description: |
