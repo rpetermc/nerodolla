@@ -140,19 +140,23 @@ export function HedgeScreen() {
     setHedgeStatus,
   } = useWalletStore();
 
-  // Effective hedge currency: prefer live position-derived, fall back to wallet preference
+  // Effective hedge currency: trust live position data when hedged; otherwise fall
+  // back to saved preference.  This prevents a stale saved preference (e.g. user
+  // accidentally tapped XAU in the HedgeOrchestrator once) from overriding the
+  // actual open position.
   const walletEntry = walletList.find(w => w.id === activeWalletId);
   const savedWalletCurrency = activeWalletId
     ? (localStorage.getItem(`nerodolla_hedge_currency_${activeWalletId}`) as HedgeCurrency | null)
     : null;
-  const effectiveHedgeCurrency = (hedgeStatus?.hedgeCurrency && hedgeStatus?.hedgeCurrency !== 'USD' ? hedgeStatus?.hedgeCurrency : null) ?? savedWalletCurrency ?? walletEntry?.hedgeCurrency ?? 'USD';
+  const effectiveHedgeCurrency = hedgeStatus?.isHedged
+    ? (hedgeStatus.hedgeCurrency ?? 'USD')
+    : (savedWalletCurrency ?? walletEntry?.hedgeCurrency ?? 'USD');
 
   const xmrBalance = xmrInfo
     ? Number(xmrInfo.totalReceived - xmrInfo.totalSent) / 1e12
     : 0;
 
   const isHedged = hedgeStatus?.isHedged ?? false;
-  const [botActive, setBotActive] = useState(false);
   const [realisedApy, setRealisedApy] = useState<number | null>(null);
   const [currencyBotApy, setCurrencyBotApy] = useState<number | null>(null);
   const [accountEarnings, setAccountEarnings] = useState<BotEarnings | null>(null);
@@ -165,11 +169,50 @@ export function HedgeScreen() {
   const [xmrBotStatus, setXmrBotStatus] = useState<BotStatus | null>(null);
   const [currencyBotStatus, setCurrencyBotStatus] = useState<BotStatus | null>(null);
 
+  // Derive botActive from actual bot status — single source of truth prevents the
+  // "header shows but box is missing" bug that happens when BotToggle sets
+  // botActive=true while HedgeScreen's own xmrBotStatus is still null.
+  const botActive =
+    (xmrBotStatus?.status === 'running' || xmrBotStatus?.status === 'paused') ||
+    (effectiveHedgeCurrency !== 'USD' &&
+      (currencyBotStatus?.status === 'running' || currencyBotStatus?.status === 'paused'));
+
+  // Clear stale saved preference when the live position is USD-only.
+  // Prevents an accidental XAU tap in the HedgeOrchestrator from persisting
+  // forever and bleeding into the hedged UI.
+  useEffect(() => {
+    if (hedgeStatus?.isHedged && hedgeStatus?.hedgeCurrency === 'USD' && activeWalletId) {
+      const key = `nerodolla_hedge_currency_${activeWalletId}`;
+      const saved = localStorage.getItem(key);
+      if (saved && saved !== 'USD') {
+        localStorage.removeItem(key);
+      }
+    }
+  }, [hedgeStatus?.isHedged, hedgeStatus?.hedgeCurrency, activeWalletId]);
+
+  // Reset local bot state when wallet changes so we never show stale data from a
+  // previous wallet's session.
+  useEffect(() => {
+    setXmrBotStatus(null);
+    setCurrencyBotStatus(null);
+    setAccountEarnings(null);
+    setRealisedApy(null);
+    setCurrencyBotApy(null);
+  }, [activeWalletId]);
+
+  // Fetch live hedge status on mount so the UI is current (avoids showing stale
+  // data from a previous session when the app was backgrounded without locking).
+  useEffect(() => {
+    refreshHedgeStatus();
+  }, []);
+
   useEffect(() => {
     getXmrMarketInfo().then(setLighterMarket).catch(() => {});
     // Fetch currency market for the active hedge currency
     if (effectiveHedgeCurrency !== 'USD') {
       getMarketInfo(`${effectiveHedgeCurrency}-USD`).then(setCurrencyMarket).catch(() => {});
+    } else {
+      setCurrencyMarket(null);
     }
   }, [setLighterMarket, effectiveHedgeCurrency]);
 
@@ -192,20 +235,24 @@ export function HedgeScreen() {
   useEffect(() => {
     const fetchStatus = () => {
       getBotStatus(77)
-        .then(s => {
-          setXmrBotStatus(s);
-          // Auto-detect running bot even if BotToggle missed it
-          if (s?.status === 'running' || s?.status === 'paused') {
-            setBotActive(true);
+        .then(s => setXmrBotStatus(s))
+        .catch((err) => {
+          // Clear stale bot status on 401 so the UI doesn't show a phantom bot
+          // after wallet switch or session expiry.
+          if (err instanceof Error && err.message.includes('HTTP 401')) {
+            setXmrBotStatus(null);
           }
-        })
-        .catch(() => {});
+        });
       if (effectiveHedgeCurrency !== 'USD') {
         const mktId = CURRENCY_TO_MARKET_ID[effectiveHedgeCurrency];
         if (mktId) {
           getBotStatus(mktId)
             .then(s => setCurrencyBotStatus(s))
-            .catch(() => {});
+            .catch((err) => {
+              if (err instanceof Error && err.message.includes('HTTP 401')) {
+                setCurrencyBotStatus(null);
+              }
+            });
         }
       }
     };
@@ -519,7 +566,6 @@ export function HedgeScreen() {
                   hedgePosition={hedgeStatus?.position}
                   lighterUsdc={hedgeStatus?.lighterUsdc}
                   hedgeCurrency="USD"
-                  onActiveChange={setBotActive}
                   onApyChange={setRealisedApy}
                 />
               )}
@@ -573,7 +619,6 @@ export function HedgeScreen() {
                 xmrBalance={xmrBalance}
                 lighterUsdc={hedgeStatus?.lighterUsdc}
                 hedgeCurrency="USD"
-                onActiveChange={setBotActive}
                 onApyChange={setRealisedApy}
               />
               {effectiveHedgeCurrency !== 'USD' && (

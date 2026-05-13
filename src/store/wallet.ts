@@ -12,6 +12,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { clearAllSessions } from '../backend/lighter';
 import type { XmrKeys } from '../wallet/xmr';
 import type { EthWallet } from '../wallet/eth';
 import type { LwsAddressInfo, LwsTransaction } from '../backend/lws';
@@ -269,6 +270,8 @@ export const useWalletStore = create<WalletState & WalletActions>()((set, get) =
   lock: () => {
     // Clear cached PIN from memory
     delete (window as unknown as { __nerodolla_pin?: string }).__nerodolla_pin;
+    // Wipe all Lighter session tokens so stale sessions don't bleed across wallets
+    clearAllSessions();
     set({
       isUnlocked: false,
       activeWalletId: null,
