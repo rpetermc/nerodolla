@@ -308,6 +308,29 @@ export async function switchHedge(
 }
 
 /**
+ * Switch hedge currency and restart bots atomically.
+ * Stops any running bots, executes the switch, then restarts them.
+ */
+export async function switchHedgeWithBot(
+  toCurrency: HedgeCurrency,
+  xmrAddress: string,
+  viewKey: string,
+  xmrBalance: number,
+  slippageBps = 50,
+): Promise<HedgeResult> {
+  return proxyFetch<HedgeResult>('/hedge/switch-with-bot', {
+    method: 'POST',
+    body: JSON.stringify({
+      to_currency: toCurrency,
+      slippage_bps: slippageBps,
+      xmr_address: xmrAddress,
+      view_key: viewKey,
+      xmr_balance: xmrBalance,
+    }),
+  });
+}
+
+/**
  * Withdraw excess USDC collateral while positions are open.
  */
 export async function withdrawExcessCollateral(

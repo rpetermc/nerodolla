@@ -1374,3 +1374,129 @@ body {
 .bot-health-panel__row { display: flex; justify-content: space-between; font-size: 13px; color: var(--color-text); }
 .bot-health-panel__row--warn { color: var(--color-yellow); font-weight: 600; }
 .bot-health-panel__error { margin-top: 8px; font-size: 12px; color: var(--color-red); background: rgba(244,67,54,0.08); padding: 8px; border-radius: var(--radius-sm); }
+
+/* ── Manage Hedge Sheet ───────────────────────────────────────────────────── */
+.manage-sheet-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: flex-end; justify-content: center;
+  z-index: 200; padding: 0 0 env(safe-area-inset-bottom,0);
+}
+.manage-sheet {
+  background: var(--color-surface); border-radius: var(--radius) var(--radius) 0 0;
+  width: 100%; max-width: 480px; padding: 20px; display: flex; flex-direction: column; gap: 16px;
+  max-height: 85vh; overflow-y: auto;
+}
+.manage-sheet__header {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.manage-sheet__title { font-size: 18px; font-weight: 600; }
+.manage-sheet__close {
+  background: none; border: none; color: var(--color-text-muted); cursor: pointer;
+  font-size: 20px; padding: 4px;
+}
+.manage-sheet__section {}
+.manage-sheet__section-title {
+  font-size: 13px; font-weight: 600; color: var(--color-text-muted); margin-bottom: 8px;
+}
+.manage-sheet__currency-grid {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.manage-sheet__currency-btn {
+  flex: 1; min-width: 70px; padding: 8px 0;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-surface); color: var(--color-text-muted);
+  font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+  text-align: center;
+}
+.manage-sheet__currency-btn:hover:not(:disabled) {
+  border-color: var(--color-primary); color: var(--color-primary);
+}
+.manage-sheet__currency-btn--active {
+  border-color: var(--color-primary); color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+}
+.manage-sheet__currency-btn:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+.manage-sheet__toggle {
+  width: 100%; display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-surface); color: var(--color-text);
+  font-size: 14px; font-weight: 500; cursor: pointer;
+}
+.manage-sheet__collateral {
+  margin-top: 8px; padding: 12px;
+  background: var(--color-surface-2); border-radius: 8px;
+}
+.manage-sheet__section--danger {
+  border-top: 1px solid var(--color-border); padding-top: 12px;
+}
+.manage-sheet__unhedge-btn {
+  width: 100%; padding: 10px 12px;
+  border: 1px solid rgba(244,67,54,0.4); border-radius: 8px;
+  background: rgba(244,67,54,0.08); color: var(--color-red);
+  font-size: 14px; font-weight: 500; cursor: pointer; text-align: center;
+}
+.manage-sheet__unhedge-btn:hover {
+  background: rgba(244,67,54,0.15);
+}
+
+/* ── Switch Preview Modal ─────────────────────────────────────────────────── */
+.switch-preview-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 300; padding: 16px;
+}
+.switch-preview-modal {
+  background: var(--color-surface); border-radius: var(--radius-md);
+  width: 100%; max-width: 400px; padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.switch-preview-modal__header {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.switch-preview-modal__header h3 { font-size: 17px; font-weight: 600; margin: 0; }
+.switch-preview-modal__close {
+  background: none; border: none; color: var(--color-text-muted); cursor: pointer;
+  font-size: 20px; padding: 4px;
+}
+.switch-preview-modal__subtitle {
+  font-size: 15px; font-weight: 600; color: var(--color-primary);
+  text-align: center; padding: 4px 0;
+}
+.switch-preview-modal__review {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--color-surface-2); border-radius: var(--radius-sm); padding: 12px;
+}
+.switch-preview-modal__row {
+  display: flex; justify-content: space-between; font-size: 14px;
+}
+.switch-preview-modal__row--muted { color: var(--color-text-muted); font-size: 13px; }
+.switch-preview-modal__row--warn { color: var(--color-yellow); }
+.switch-preview-modal__row--green { color: var(--color-green); font-weight: 600; }
+.switch-preview-modal__row--info { color: var(--color-primary); font-weight: 500; }
+.switch-preview-modal__note {
+  font-size: 12px; color: var(--color-text-muted); line-height: 1.4;
+}
+.switch-preview-modal__actions {
+  display: flex; gap: 8px; margin-top: 4px;
+}
+.switch-preview-modal__actions .btn { flex: 1; }
+
+/* ── Currency position line (replaces BotToggle for non-XMR pairs) ────────── */
+.hedge-currency-pos {
+  background: var(--color-surface); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 12px; margin: 8px 0;
+}
+.hedge-currency-pos__label {
+  font-size: 13px; font-weight: 600; color: var(--color-text-muted); margin-bottom: 4px;
+}
+.hedge-currency-pos__value {
+  font-size: 15px; font-weight: 600;
+}
+.hedge-currency-pos__muted {
+  font-size: 13px; color: var(--color-text-muted); font-weight: 400;
+}
+.hedge-currency-pos__target {
+  font-size: 12px; color: var(--color-text-muted); margin-top: 4px;
+}

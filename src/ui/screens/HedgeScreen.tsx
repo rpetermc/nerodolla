@@ -3,8 +3,9 @@ import { useWalletStore } from '../../store/wallet';
 import { HedgeOrchestrator } from '../components/HedgeOrchestrator';
 import { UnhedgeOrchestrator, hasUnhedgeInProgress } from '../components/UnhedgeOrchestrator';
 import { BotToggle } from '../components/BotToggle';
-import { CollateralAdjust } from '../components/CollateralAdjust';
-import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedge, CURRENCY_TO_MARKET_ID, getAccountEarnings, getBotStatus } from '../../backend/lighter';
+import { ManageHedgeSheet } from '../components/ManageHedgeSheet';
+import { SwitchPreviewModal } from '../components/SwitchPreviewModal';
+import { getHedgeStatus, getXmrMarketInfo, getMarketInfo, fetchEthUsdcBalanceProxy, rebalanceHedge, switchHedgeWithBot, CURRENCY_TO_MARKET_ID, getAccountEarnings, getBotStatus } from '../../backend/lighter';
 import type { BotEarnings, BotStatus } from '../../backend/lighter';
 import type { LighterMarketInfo, LighterPosition, HedgeCurrency } from '../../backend/lighter';
 
@@ -54,12 +55,12 @@ function BotHealthPanel({ status, label }: { status: BotStatus | null; label: st
       </div>
       <div className="bot-health-panel__rows">
         <div className="bot-health-panel__row">
-          <span>Target</span>
-          <span>{Math.abs(target).toFixed(4)}</span>
+          <span>Target position</span>
+          <span>{target.toFixed(4)}</span>
         </div>
         <div className="bot-health-panel__row">
-          <span>Position</span>
-          <span>{Math.abs(pos).toFixed(4)}</span>
+          <span>Current position</span>
+          <span>{pos.toFixed(4)}</span>
         </div>
         {isDrifted && (
           <div className="bot-health-panel__row bot-health-panel__row--warn">
@@ -133,6 +134,7 @@ export function HedgeScreen() {
     lighterMarket,
     hedgeStatus,
     ethWallet,
+    xmrKeys,
     xmrInfo,
     activeWalletId,
     walletList,
@@ -165,7 +167,9 @@ export function HedgeScreen() {
   const [recoverInstead, setRecoverInstead] = useState(false);
   const [currencyMarket, setCurrencyMarket] = useState<LighterMarketInfo | null>(null);
   const [switching, setSwitching] = useState(false);
-  const [switchTarget, setSwitchTarget] = useState<HedgeCurrency | null>(null);
+  const [previewCurrency, setPreviewCurrency] = useState<HedgeCurrency | null>(null);
+  const [previewMarkPrice, setPreviewMarkPrice] = useState<number>(0);
+  const [manageSheetOpen, setManageSheetOpen] = useState(false);
   const [xmrBotStatus, setXmrBotStatus] = useState<BotStatus | null>(null);
   const [currencyBotStatus, setCurrencyBotStatus] = useState<BotStatus | null>(null);
 
@@ -293,11 +297,28 @@ export function HedgeScreen() {
     } catch { /* ignore */ }
   }
 
+  // Fetch target currency mark price when preview modal opens
+  useEffect(() => {
+    if (!previewCurrency || previewCurrency === 'USD') {
+      setPreviewMarkPrice(0);
+      return;
+    }
+    getMarketInfo(`${previewCurrency}-USD`)
+      .then(m => setPreviewMarkPrice(m?.markPrice ?? 0))
+      .catch(() => setPreviewMarkPrice(0));
+  }, [previewCurrency]);
+
   async function handleSwitchHedge(toCurrency: HedgeCurrency) {
+    if (!xmrKeys) return;
     setSwitching(true);
-    setSwitchTarget(null);
+    setPreviewCurrency(null);
     try {
-      const result = await switchHedge(toCurrency);
+      const result = await switchHedgeWithBot(
+        toCurrency,
+        xmrKeys.primaryAddress,
+        xmrKeys.viewKeyPrivate,
+        xmrBalance,
+      );
       if (!result.success) throw new Error(result.error ?? 'Switch failed');
       await refreshHedgeStatus();
     } catch (err) {
@@ -514,47 +535,15 @@ export function HedgeScreen() {
                 />
               )}
 
-              {isHedged && hedgeStatus?.position && (
-                <CollateralAdjust
-                  onComplete={refreshHedgeStatus}
-                  lighterUsdc={hedgeStatus.lighterUsdc ?? 0}
-                  marginUsed={hedgeStatus.position.marginUsed}
-                  markPrice={hedgeStatus.position.markPrice}
-                  positionSize={hedgeStatus.position.size}
-                />
-              )}
-
-              {/* Hedge switch */}
-              {isHedged && !botActive && (
-                <div className="hedge-switch">
-                  {switchTarget ? (
-                    <div className="hedge-switch__panel">
-                      <div className="hedge-switch__title">Switch hedge to:</div>
-                      <div className="hedge-switch__grid">
-                        {(['USD', 'EUR', 'GBP', 'XAU', 'XAG'] as HedgeCurrency[])
-                          .filter(c => c !== effectiveHedgeCurrency)
-                          .map(c => (
-                            <button
-                              key={c}
-                              className="btn btn--secondary btn--sm"
-                              disabled={switching}
-                              onClick={() => handleSwitchHedge(c)}
-                            >
-                              {c === 'USD' ? '$ USD' : c === 'EUR' ? '€ EUR' : c === 'GBP' ? '£ GBP' : c === 'XAU' ? 'Au GOLD' : 'Ag SILVER'}
-                            </button>
-                          ))}
-                      </div>
-                      {switching && <div className="hedge-switch__status">Switching…</div>}
-                      <button className="btn btn--ghost btn--sm" onClick={() => setSwitchTarget(null)} disabled={switching}>
-                        Cancel
-                      </button>
-                    </div>
-                  ) : (
-                    <button className="btn btn--ghost btn--sm" onClick={() => setSwitchTarget(effectiveHedgeCurrency ?? 'USD')}>
-                      Switch currency
-                    </button>
-                  )}
-                </div>
+              {/* Manage Hedge — unified entry point for switch / collateral / unhedge */}
+              {isHedged && (
+                <button
+                  className="btn btn--secondary"
+                  style={{ marginTop: 8, width: '100%' }}
+                  onClick={() => setManageSheetOpen(true)}
+                >
+                  Manage Hedge — switch, adjust, or close
+                </button>
               )}
 
               {/* XMR-USD bot — always shown when hedged (the short hedge) */}
@@ -570,18 +559,25 @@ export function HedgeScreen() {
                 />
               )}
 
-              {/* Currency-USD bot — shown for non-USD hedges (the long leg) */}
-              {isHedged && effectiveHedgeCurrency !== 'USD' && (
-                <BotToggle
-                  marketId={currencyMarketId}
-                  marketSymbol={`${effectiveHedgeCurrency}-USD`}
-                  xmrBalance={xmrBalance}
-                  lighterUsdc={hedgeStatus?.lighterUsdc}
-                  hedgeCurrency={effectiveHedgeCurrency}
-                  currencyMarkPrice={hedgeStatus?.eurPosition?.markPrice}
-                  currencyEntryPrice={hedgeStatus?.eurPosition?.entryPrice}
-                  onApyChange={setCurrencyBotApy}
-                />
+              {/* Currency position — simple line for non-USD hedges */}
+              {isHedged && effectiveHedgeCurrency !== 'USD' && hedgeStatus?.eurPosition && (
+                <div className="hedge-currency-pos">
+                  <div className="hedge-currency-pos__label">
+                    {effectiveHedgeCurrency} position
+                  </div>
+                  <div className="hedge-currency-pos__value">
+                    {hedgeStatus.eurPosition.size.toFixed(4)} {effectiveHedgeCurrency}
+                    {' '}
+                    <span className="hedge-currency-pos__muted">
+                      @ {hedgeStatus.eurPosition.markPrice.toFixed(4)}
+                    </span>
+                  </div>
+                  {currencyBotStatus && currencyBotStatus.status !== 'stopped' && (
+                    <div className="hedge-currency-pos__target">
+                      Target: {Math.abs(currencyBotStatus.targetXmr).toFixed(4)} · Next rebalance: weekdays 14:00 UTC
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Bot health panels — visible when bot is active */}
@@ -589,9 +585,6 @@ export function HedgeScreen() {
                 <div className="bot-health-section">
                   <h4 className="bot-health-section__title">Bot Health</h4>
                   <BotHealthPanel status={xmrBotStatus} label="XMR-USD" />
-                  {effectiveHedgeCurrency !== 'USD' && (
-                    <BotHealthPanel status={currencyBotStatus} label={`${effectiveHedgeCurrency}-USD`} />
-                  )}
                 </div>
               )}
 
@@ -599,6 +592,7 @@ export function HedgeScreen() {
                 onUnhedged={refreshHedgeStatus}
                 walletId={activeWalletId ?? undefined}
                 onForceEthRecovery={(amount) => setForcedEthRecovery(amount)}
+                onSwitchInstead={() => setManageSheetOpen(true)}
               />
             </>
           );
@@ -646,6 +640,30 @@ export function HedgeScreen() {
           <li>Withdrawal delay from Lighter (up to ~4h; longer during high Arbitrum load)</li>
         </ul>
       </div>
+
+      {/* ── Overlays ── */}
+      <ManageHedgeSheet
+        isOpen={manageSheetOpen}
+        onClose={() => setManageSheetOpen(false)}
+        currentCurrency={effectiveHedgeCurrency ?? 'USD'}
+        hedgeStatus={hedgeStatus}
+        onSwitch={(to) => setPreviewCurrency(to)}
+        onUnhedge={() => { /* UnhedgeOrchestrator handles its own state */ }}
+        onRefresh={refreshHedgeStatus}
+      />
+
+      {previewCurrency && (
+        <SwitchPreviewModal
+          fromCurrency={effectiveHedgeCurrency ?? 'USD'}
+          toCurrency={previewCurrency}
+          hedgeStatus={hedgeStatus}
+          xmrBalance={xmrBalance}
+          toCurrencyMarkPrice={previewMarkPrice}
+          onConfirm={() => handleSwitchHedge(previewCurrency)}
+          onCancel={() => setPreviewCurrency(null)}
+          busy={switching}
+        />
+      )}
     </div>
   );
 }

@@ -101,9 +101,11 @@ interface UnhedgeOrchestratorProps {
   ethUsdcRecovery?: number;
   /** Called when "Start fresh" detects ETH USDC via proxy — passes amount to parent. */
   onForceEthRecovery?: (amount: number) => void;
+  /** Called when user opts to switch currency instead of unhedging. */
+  onSwitchInstead?: () => void;
 }
 
-export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availableUsdc, ethUsdcRecovery, onForceEthRecovery }: UnhedgeOrchestratorProps) {
+export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availableUsdc, ethUsdcRecovery, onForceEthRecovery, onSwitchInstead }: UnhedgeOrchestratorProps) {
   const { ethWallet, xmrKeys, hedgeStatus } = useWalletStore();
 
   const [step, setStep]                 = useState<UnhedgeStep>('idle');
@@ -549,6 +551,18 @@ export function UnhedgeOrchestrator({ onUnhedged, walletId, recoveryMode, availa
           </button>
           <button className="btn btn--ghost" onClick={() => setStep('idle')}>Cancel</button>
         </div>
+        {onSwitchInstead && !recoveryMode && ethUsdcRecovery == null && (
+          <button
+            className="btn btn--ghost"
+            style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}
+            onClick={() => {
+              setStep('idle');
+              onSwitchInstead();
+            }}
+          >
+            Or switch to a different currency instead →
+          </button>
+        )}
       </div>
     );
   }
